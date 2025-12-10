@@ -25,3 +25,12 @@ The trained model checkpoint is at: [wandb link](https://wandb.ai/afzalxo-hong-k
 
 Train/val log: [wandb link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl/logs?nw=nwuserafzalxo)
 
+### Evaluation
+
+4. The evaluation can be started by running:
+
+```bash
+python3 eval_moe.py
+```
+
+Please modify the `MODEL_PATH` variable at the top of the file as needed.
