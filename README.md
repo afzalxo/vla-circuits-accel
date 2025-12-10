@@ -21,4 +21,10 @@ The samples and dataset will be saved in a directory named `babyai_vla_dataset`.
 python3 train_dense_moe_fast.py
 ```
 
-I will upload the trained model pth file to a file hosting service and share the link here soon.
+The trained model checkpoint is at: [wandb link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl/files?nw=nwuserafzalxo) under the filename `best_vla_moe_fast.pth` and the `vocab.pth` file is also located there.
+
+Train/val log: [wandb link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl/logs?nw=nwuserafzalxo)
+
+Plots: [link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl?nw=nwuserafzalxo)
+
+
