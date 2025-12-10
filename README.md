@@ -25,6 +25,3 @@ The trained model checkpoint is at: [wandb link](https://wandb.ai/afzalxo-hong-k
 
 Train/val log: [wandb link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl/logs?nw=nwuserafzalxo)
 
-Plots: [link](https://wandb.ai/afzalxo-hong-kong-university-of-science-and-technology/sparse-vla-accel/runs/s71fp8yl?nw=nwuserafzalxo)
-
-
