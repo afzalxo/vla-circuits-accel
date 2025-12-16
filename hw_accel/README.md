@@ -47,3 +47,5 @@ for h in range(0, H, H_{tile}):
         We now have the final result for this Output Tile.
         Apply ReLU -> DMA Write Output Strip to HBM
 ```
+
+
