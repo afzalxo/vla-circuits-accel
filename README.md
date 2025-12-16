@@ -34,3 +34,8 @@ python3 eval_moe.py
 ```
 
 Please modify the `MODEL_PATH` variable at the top of the file as needed.
+
+
+## 16 Dec (Update on HW Accelerator):
+
+Please see directory `hw_accel`.
