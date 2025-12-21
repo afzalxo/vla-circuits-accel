@@ -102,8 +102,8 @@ Several critical bugs were resolved in the core logic to support this integratio
 *   **Accumulation:** SIMD-style accumulation of partial sums in the Tile Manager is functional.
 
 ### Next Steps
-*   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo).
-*   **Full Frame Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic.
-*   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
+- [x]   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo). **Update: Completed and verified.**
+- [ ]   **Full Frame Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic.
+- [ ]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
 
 ---

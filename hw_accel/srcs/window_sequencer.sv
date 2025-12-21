@@ -76,11 +76,9 @@ module window_sequencer #(
 
         case (kernel_y)
             2'd0: begin // TOP
-                if (row_idx != 0) begin
-                    selected_curr = curr_strip_0; 
-                    selected_next = next_strip_0;
-                    selected_prev_pixel = prev_last_pixel_0; 
-                end
+                selected_curr = curr_strip_0; 
+                selected_next = next_strip_0;
+                selected_prev_pixel = prev_last_pixel_0; 
             end
             2'd1: begin // CENTER
                 selected_curr = curr_strip_1; 
@@ -88,11 +86,9 @@ module window_sequencer #(
                 selected_prev_pixel = prev_last_pixel_1; 
             end
             2'd2: begin // BOTTOM
-                if (row_idx != img_height - 1) begin
-                    selected_curr = curr_strip_2; 
-                    selected_next = next_strip_2;
-                    selected_prev_pixel = prev_last_pixel_2; 
-                end
+                selected_curr = curr_strip_2; 
+                selected_next = next_strip_2;
+                selected_prev_pixel = prev_last_pixel_2; 
             end
         endcase
     end

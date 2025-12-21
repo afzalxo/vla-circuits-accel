@@ -46,14 +46,18 @@ module tile_manager #(
     // --- INTERNAL URAMs ---
     // Input Buffer: Stores Tile + Halo
     // Size: (TILE_HEIGHT + 2) * MAX_IMG_WIDTH
-    reg [PP_PAR*IC_PAR*DATA_WIDTH-1:0] uram_input [0:4095];
+    // Make sure tools infer URAM here.
+    (* ram_style = "uram" *)
+    reg [PP_PAR*IC_PAR*DATA_WIDTH-1:0] uram_input [0:(TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR - 1];
 
+    (* ram_style = "bram" *)
     reg [OC_PAR*IC_PAR*DATA_WIDTH-1:0] weights_bram [0:3*3-1];
     
     // Output Buffer: Stores Result
     // Size: TILE_HEIGHT * MAX_IMG_WIDTH
     // Note: We store the full result here for now.
     // In a real system, we would DMA this back to HBM.
+    (* ram_style = "uram" *)
     reg [PP_PAR*OC_PAR*28-1:0] uram_output [0:4095]; 
 
     // --- SIGNALS ---
@@ -146,7 +150,7 @@ module tile_manager #(
     ) acc (
         .clk(clk), .rst_n(rst_n), .start(acc_start),
         .img_width_strips(full_img_width_strips),
-        .img_height(TILE_HEIGHT), // Accelerator sees a small image
+        .img_height(TILE_HEIGHT + 2), // Accelerator sees a small image
 	.img_channels(full_img_channels),
         .weights(acc_weights_data),
 	.k_x(k_x), .k_y(k_y),
@@ -170,14 +174,31 @@ module tile_manager #(
 	end
     end
     
-
+    reg [2:0] state;
+    // --- MAIN FSM ---
+    localparam S_IDLE = 0;
+    localparam S_DMA_FM  = 1;
+    localparam S_DMA_W   = 6;
+    localparam S_INIT_URAM = 7;
+    localparam S_ACC_START = 2;
+    localparam S_ACC_STREAM = 3;
+    localparam S_ACC_WAIT = 4;
+    localparam S_NEXT_TILE = 5;
+ 
     integer p, o;
+    reg [15:0] acc_out_row_cnt;
+    reg [15:0] acc_out_col_cnt;
     // --- URAM WRITE LOGIC (Accelerator -> Output URAM) ---
     // We simply append results linearly
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             out_ptr <= 0;
+	end else if (state == S_ACC_START) begin
+	    out_ptr <= 0;
+	    acc_out_row_cnt <= 0;
+            acc_out_col_cnt <= 0;
         end else if (acc_dout_valid) begin
+	    if (acc_out_row_cnt >= 1 && acc_out_row_cnt <= TILE_HEIGHT) begin
             if (current_tile_ic == 0) begin
                 // First pass: Overwrite/Initialize
                 uram_output[out_ptr] <= acc_dout_data;
@@ -195,20 +216,19 @@ module tile_manager #(
                 end
             end
             out_ptr <= out_ptr + 1;
+	    end
+
+	    if (acc_out_col_cnt == full_img_width_strips - 1) begin
+                acc_out_col_cnt <= 0;
+                acc_out_row_cnt <= acc_out_row_cnt + 1;
+            end else begin
+                acc_out_col_cnt <= acc_out_col_cnt + 1;
+            end
+ 
         end
     end
-
-
-    // --- MAIN FSM ---
-    localparam S_IDLE = 0;
-    localparam S_DMA_FM  = 1;
-    localparam S_DMA_W   = 6;
-    localparam S_ACC_START = 2;
-    localparam S_ACC_STREAM = 3;
-    localparam S_ACC_WAIT = 4;
-    localparam S_NEXT_TILE = 5;
-    
-    reg [2:0] state;
+   
+    integer i;
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -236,16 +256,29 @@ module tile_manager #(
 			current_tile_ic <= 0;
 			current_tile_oc <= 0;
                         out_ptr <= 0; // Reset output pointer
-                        state <= S_DMA_FM;
-                        dma_start <= 1;
-			weights_dma_start <= 1;
-			dma_done_r <= 0;
-			dma_w_done_r <= 0;
+                        state <= S_INIT_URAM;
+                        // dma_start <= 1;
+			// weights_dma_start <= 1;
+			// dma_done_r <= 0;
+			// dma_w_done_r <= 0;
                     end
                 end
+
+		S_INIT_URAM: begin
+		    for (i = 0; i < (TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR; i = i + 1) begin
+			uram_input[i] <= 0;
+		    end
+		    dma_start <= 1;
+                    weights_dma_start <= 1;
+                    dma_done_r <= 0;
+                    dma_w_done_r <= 0;
+		    state <= S_DMA_FM;
+		end
                 
                 // 1. Load Tile from HBM to URAM
                 S_DMA_FM: begin
+		    dma_start <= 0;
+		    weights_dma_start <= 0;
 		    if (dma_done) begin
 		        dma_done_r <= 1;
 		    end
@@ -271,7 +304,7 @@ module tile_manager #(
                     // We assume URAM read is 0-latency (Register file behavior for sim)
                     // In real HW, need 1-cycle read latency handling
                     
-                    if (stream_ptr < (TILE_HEIGHT) * full_img_width_strips) begin
+                    if (stream_ptr < (TILE_HEIGHT + 2) * full_img_width_strips) begin
                         acc_din_valid <= 1;
                         acc_din_data <= uram_input[stream_ptr];
                         
@@ -330,6 +363,20 @@ module tile_manager #(
     integer out_dump;
     
     initial begin
+
+	wait(state == S_ACC_START);
+        #1;
+        
+        $display("[SIM-DEBUG] Dumping Input URAM Content...");
+        f_dump = $fopen("hw_dump_input_uram.txt", "w");
+        
+        // Dump all rows (TILE_HEIGHT + 2)
+        // Each row has (img_width / PP_PAR) words
+        for (i_dump = 0; i_dump < (TILE_HEIGHT + 2) * (full_img_width_strips); i_dump = i_dump + 1) begin
+            $fdisplay(f_dump, "Addr %0d: %h", i_dump, uram_input[i_dump]);
+        end
+        $fclose(f_dump);
+	
         // Wait until the controller signals that loading is finished
         // You might need to pass 'load_done' into this module or trigger on a state
         wait(state == S_ACC_START && current_tile_y == 0 && current_tile_ic == 0);
