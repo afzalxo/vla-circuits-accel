@@ -103,7 +103,14 @@ Several critical bugs were resolved in the core logic to support this integratio
 
 ### Next Steps
 - [x]   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo). **Update: Completed and verified.**
-- [ ]   **Full Frame Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic.
+- [ ]   **Looping over OC Tiles:** Extend the Tile Manager to loop over Output Channel tiles, enabling processing of arbitrary OC sizes (currently only processing the first OC tile).
+- [ ]   **Looping over H Tiles:** Extend the Tile Manager to loop over Height tiles, enabling processing of arbitrary image heights (currently only processing the first OC tile of the first H tile).
+- [ ]   **Storing Output of Current H Tile/OC Tile:** Implement logic to write back the completed output tile to HBM after processing all IC tiles for the current H/OC tile.
+- [ ]   **Double Buffering:** Implement double buffering so the output storing of the current H/OC tile can occur in parallel with loading the next tile.
+- [ ]   **Full Image Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic and currect output computation for one conv layer.
+- [ ]   **ReLU Activation:** Integrate ReLU activation as a post-processing after computing current H/OC tile.
+- [ ]   **Re-Quantization:** Implement re-quantization logic after ReLU to map outputs of accumulator bit-width (28-bits) back to int8 range.
+- [ ]   **Multi-Layer Support:** Extend accelerator to support multiple conv layers in sequence.
 - [ ]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
 
 ---
