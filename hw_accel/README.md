@@ -49,3 +49,61 @@ for h in range(0, H, H_{tile}):
 ```
 
 
+---
+
+## Update 21st December: Hardware Emulation and Memory Subsystem Integration
+
+Focus: System-Level Integration, Memory Tiling, and C++ Host Emulation
+
+### Summary
+We have transitioned from block-level Verilog simulation to a full Hardware Emulation Workflow. This update introduces the top-level memory management logic (`tile_manager`), the Direct Memory Access (DMA) engines, and a C++ Host application that drives the simulation. The accelerator now supports loading tiled feature maps and weights from external memory (simulated HBM), enabling the processing of arbitrary image sizes via tiling.
+
+### Architectural Changes
+
+#### 1. Top-Level Hierarchy (`vla_accel_top`)
+The design has been wrapped in an AXI-compliant top-level module suitable for AMD/Xilinx Vitis/Vivado integration.
+*   **Control Interface:** AXI4-Lite (`s_axi_control`) for register configuration (start, done, pointers).
+*   **Data Interface:** AXI4-Master (`m_axi_gmem`) for high-bandwidth access to external memory.
+*   **Core Logic:** Instantiates the `tile_manager` which governs the accelerator core.
+
+#### 2. The Tile Manager (`tile_manager.sv`)
+A new control unit that abstracts memory management from the compute core.
+*   **Function:** Orchestrates the movement of data between Global Memory (HBM), On-Chip Memory (URAM/BRAM), and the Compute Core.
+*   **Tiling Strategy:** Implements **Height-Tiled, Input-Stationary** dataflow.
+    1.  Loads a horizontal strip of the Input Feature Map (e.g., 4 rows) into **URAM**.
+    2.  Iterates through Input Channel (IC) tiles.
+    3.  Loads corresponding Weights into **BRAM**.
+    4.  Streams data through the `conv_accelerator`.
+    5.  Accumulates Partial Sums in the Output URAM.
+
+#### 3. DMA Engines
+*   **`tiled_dma.sv`:** Handles 3D strided access to fetch specific spatial tiles ($H_{tile} \times W \times IC_{tile}$) from the flat memory address space in HBM to on-chip URAM.
+*   **`weights_dma.sv`:** Fetches weight blocks ($OC_{tile} \times IC_{tile} \times 3 \times 3$) into on-chip BRAM.
+
+### Host-Side Emulation (C++)
+
+We have replaced the SystemVerilog testbench (`tb_full_image.sv`) with a C++ Host Application (`host_main.cpp`) that mimics the runtime driver.
+
+*   **Data Packing:** Implemented custom packing functions to transform standard NCHW/NHWC tensors into the hardware-optimized blocked layout:
+*   **Bit-Accurate Verification:** The host code generates a "Golden Model" ground truth using the exact same integer arithmetic and padding logic as the hardware, allowing for automated bit-perfect verification of the accelerator output.
+
+### Accelerator Improvements 
+
+Several critical bugs were resolved in the core logic to support this integration:
+*   **Line Buffer:** Fixed Read-After-Write hazards by implementing explicit temporary registers for memory shifts.
+*   **Controller:** Simplified the state machine to a "Spatial-First" processing model. The controller now processes a full spatial strip before requesting new IC tiles, reducing control overhead.
+*   **Signed Arithmetic:** Aligned the C++ Host and Verilog Hardware to strictly use `int8` (2's complement) arithmetic, resolving negative value discrepancies in the MAC units.
+
+### Current Status
+
+*   **Interface:** AXI-Stream handshaking between DMA and Accelerator is stable.
+*   **Memory:** URAM/BRAM read/write logic with partial sum accumulation is verified.
+*   **Computation:** First strip of the first tile matches Ground Truth bit-for-bit.
+*   **Accumulation:** SIMD-style accumulation of partial sums in the Tile Manager is functional.
+
+### Next Steps
+*   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo).
+*   **Full Frame Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic.
+*   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
+
+---

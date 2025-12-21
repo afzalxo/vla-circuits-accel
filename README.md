@@ -39,3 +39,7 @@ Please modify the `MODEL_PATH` variable at the top of the file as needed.
 ## 16 Dec (Update on HW Accelerator):
 
 Please see directory `hw_accel`.
+
+## 21 Dec (Further update on HW Accelerator):
+
+Added Memory Subsystem Integration and Hardware Emulation. Please see directory `hw_accel`.

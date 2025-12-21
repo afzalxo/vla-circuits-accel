@@ -13,8 +13,13 @@ module conv_accelerator #(
     
     input wire [15:0] img_width_strips,
     input wire [15:0] img_height,
+    input wire [15:0] img_channels,
     
     input wire signed [OC_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] weights,
+    output wire [1:0] k_x,
+    output wire [1:0] k_y,
+    output wire weight_req,
+    input wire weight_ack,
     
     input wire signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] din_data,
     input wire din_valid,
@@ -26,7 +31,6 @@ module conv_accelerator #(
 );
 
     wire lb_shift_en, seq_load, cu_en, cu_clear;
-    wire [1:0] k_x, k_y;
     wire [15:0] col_idx, row_idx;
     
     wire signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] row_0, row_1, row_2;
@@ -34,6 +38,7 @@ module conv_accelerator #(
     
     // NEW: Wire for valid out (unused but good for debug)
     wire cu_valid_out;
+    wire uram_replay;
 
     conv_controller #(
         .MAX_IMG_WIDTH(MAX_IMG_WIDTH), .PP_PAR(PP_PAR)
@@ -41,6 +46,10 @@ module conv_accelerator #(
         .clk(clk), .rst_n(rst_n), .start(start),
         .img_width_strips(img_width_strips), .img_height(img_height),
         .din_valid(din_valid), .din_ready(din_ready),
+	.num_ic_tiles(img_channels / IC_PAR),
+	.weight_req(weight_req),
+	.weight_ack(weight_ack),
+	.uram_replay(uram_replay),
         .lb_shift_en(lb_shift_en), .seq_load(seq_load),
         .k_x(k_x), .k_y(k_y),
         .cu_en(cu_en), .cu_clear(cu_clear),

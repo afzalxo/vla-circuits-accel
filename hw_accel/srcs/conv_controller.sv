@@ -13,6 +13,12 @@ module conv_controller #(
     
     input wire din_valid,
     output reg din_ready,
+
+    // (0, IC, IC_PAR) loop
+    input wire [15:0] num_ic_tiles,
+    output reg weight_req,
+    input wire weight_ack,
+    output reg uram_replay,
     
     output reg lb_shift_en,
     output reg seq_load,
@@ -39,12 +45,14 @@ module conv_controller #(
     localparam S_FETCH_NEXT  = 6; // Load Next Strip
     localparam S_FLUSH       = 10; // Flush Remaining Data
     localparam S_DONE        = 7;
+    localparam S_SWITCH_IC   = 11;
 
     reg [3:0] state;
     reg [3:0] kernel_step;
     reg [15:0] load_col_cnt;
     reg [15:0] load_row_cnt;
     reg [3:0] pipe_flush_cnt;
+    reg [15:0] ic_tile_cnt;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -62,6 +70,10 @@ module conv_controller #(
             load_row_cnt <= 0;
             kernel_step <= 0;
             pipe_flush_cnt <= 0;
+	    ic_tile_cnt <= 0;
+	    weight_req <= 0;
+	    uram_replay <= 0;
+
         end else begin
             // Default Pulses
             lb_shift_en <= 0;
@@ -164,11 +176,17 @@ module conv_controller #(
                 S_COMPUTE: begin
                     if (kernel_step < 9) begin
                         cu_en <= 1;
-                        cu_clear <= 0;
+			// Clear CU only at first kernel step of first IC tile
+			if (kernel_step == 0) cu_clear <= 1;
+			else cu_clear <= 0;
+
                         k_y <= kernel_step / 3;
                         k_x <= kernel_step % 3;
                         kernel_step <= kernel_step + 1;
                     end else begin
+			k_y <= 0;
+			k_x <= 0;
+			kernel_step <= 0;
                         cu_en <= 0;
                         pipe_flush_cnt <= 0;
                         state <= S_WAIT;
@@ -178,24 +196,32 @@ module conv_controller #(
                 // --- 5. WAIT & UPDATE ---
                 S_WAIT: begin
                     if (pipe_flush_cnt == 5) begin
-                        dout_valid <= 1;
-                        
-                        // Update Output Coordinate
-                        if (col_idx == img_width_strips - 1) begin
-                            col_idx <= 0;
-                            row_idx <= row_idx + 1;
-                        end else begin
-                            col_idx <= col_idx + 1;
-                        end
-                        
-                        // Check for completion
-                        if (row_idx == img_height - 1 && col_idx == img_width_strips - 1) begin
-                            state <= S_DONE;
-                        end else if (load_row_cnt >= img_height) begin
-			    state <= S_FLUSH;
-		        end else begin
-                            state <= S_FETCH_NEXT;
-			end
+			// if (ic_tile_cnt < num_ic_tiles - 1) begin
+			//    dout_valid <= 0; 
+			//    ic_tile_cnt <= ic_tile_cnt + 1;
+			//    weight_req <= 1;
+			//    uram_replay <= 1;
+			//    state <= S_SWITCH_IC;
+			// end else begin
+                            dout_valid <= 1;
+			    ic_tile_cnt <= 0;
+                            // Update Output Coordinate
+                            if (col_idx == img_width_strips - 1) begin
+                                col_idx <= 0;
+                                row_idx <= row_idx + 1;
+                            end else begin
+                                col_idx <= col_idx + 1;
+                            end
+                            
+                            // Check for completion
+                            if (row_idx == img_height - 1 && col_idx == img_width_strips - 1) begin
+                                state <= S_DONE;
+                            end else if (load_row_cnt >= img_height) begin
+			        state <= S_FLUSH;
+		            end else begin
+                                state <= S_FETCH_NEXT;
+			    end
+			// end
                     end else begin
                         pipe_flush_cnt <= pipe_flush_cnt + 1;
                     end
