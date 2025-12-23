@@ -101,6 +101,21 @@ Several critical bugs were resolved in the core logic to support this integratio
 *   **Computation:** First strip of the first tile matches Ground Truth bit-for-bit.
 *   **Accumulation:** SIMD-style accumulation of partial sums in the Tile Manager is functional.
 
+
+### Re-quantization
+
+We get `ACC_WIDTH` output width after convolution of a tile. Since `ACC_WIDTH` is larger than the 8-bit output we want to store back, we need to re-quantize the output.
+The re-quantization process involves shifting and clamping the accumulated result back to the desired 8-bit range. The formula used is:
+
+$$ Output = \text{Clamp}\left( \text{Round}\left( \frac{Accumulator}{2^n} \right) \right) $$
+
+Where $n$ is a programmable **Shift Amount**.
+
+If our inputs were effectively $Q3.5$ (3 integer bits, 5 fractional bits) and weights were $Q0.8$, our accumulator is $Q3.13$.
+To get back to an 8-bit output (say $Q3.5$), you need to shift right by $13 - 5 = 8$ bits.
+
+Please use the variable `quant_shift` in `tile_manager.sv` to set the appropriate shift amount based on your input/output quantization scheme. I have hardcoded it to d10 for now but we will need to adjust it based on the actual data scales used.
+
 ### Next Steps
 - [x]   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo). **Update (21st December): Completed and verified.**
 - [ ]   **Looping over OC Tiles:** Extend the Tile Manager to loop over Output Channel tiles, enabling processing of arbitrary OC sizes (currently only processing the first OC tile).
