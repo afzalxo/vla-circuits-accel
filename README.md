@@ -45,3 +45,5 @@ Please see directory `hw_accel`.
 Added Memory Subsystem Integration and Hardware Emulation. Please see directory `hw_accel`.
 
 ## 23 Dec (HW Accel)
+
+Convolution of full 128x128x64 feature map with 3x3x64x64 kernel implemented and verified. Takes around 3ms for this size. Perf can be improved using certain optimization techniques like double buffer (WIP). 

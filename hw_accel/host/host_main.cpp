@@ -17,16 +17,17 @@
 
 #include "ap_int.h"
 
-constexpr uint16_t FM_WIDTH = 8;    // Feature map width
-constexpr uint16_t FM_HEIGHT = 8;   // Feature map height
-constexpr uint16_t FM_CHANNELS = 32;
-constexpr uint16_t OUT_CHANNELS = 32;
+constexpr uint16_t FM_WIDTH = 128;    // Feature map width
+constexpr uint16_t FM_HEIGHT = 128;   // Feature map height
+ 
+constexpr uint16_t FM_CHANNELS = 64;
+constexpr uint16_t OUT_CHANNELS = 64;
 
 constexpr uint16_t IC_PAR = 16;
 constexpr uint16_t OC_PAR = 16;
-constexpr uint16_t PP_PAR = 4;
+constexpr uint16_t PP_PAR = 8;
 
-constexpr uint16_t TILE_HEIGHT = 4;
+constexpr uint16_t TILE_HEIGHT = 8;
 
 constexpr uint16_t FP_WIDTH = 16;
 constexpr uint16_t FP_FRAC_BITS = 8;
@@ -174,12 +175,11 @@ void pack_weights(const T* src, T* dst,
     int dst_idx = 0;
 
     // 2. Iterate in Destination Order (Hardware Order)
+    // Loop 2: Output Channel Tiles
+    for (int t_oc = 0; t_oc < num_oc_tiles; ++t_oc) {
     
-    // Loop 1: Input Channel Tiles (Outer - Input Stationary)
-    for (int t_ic = 0; t_ic < num_ic_tiles; ++t_ic) {
-        
-        // Loop 2: Output Channel Tiles
-        for (int t_oc = 0; t_oc < num_oc_tiles; ++t_oc) {
+        // Loop 1: Input Channel Tiles (Outer - Input Stationary)
+        for (int t_ic = 0; t_ic < num_ic_tiles; ++t_ic) {
             
             // Loop 3 & 4: Kernel Spatial Dimensions (3x3)
             for (int ky = 0; ky < K; ++ky) {
@@ -333,6 +333,7 @@ int main(int argc, char **argv) {
 
   std::cout << "INFO: Host execution finished successfully." << std::endl;
 
+  /*
   // =========================================================================
   // GROUND TRUTH GENERATION (Full First Tile: Rows 0-3, IC 0-15)
   // =========================================================================
@@ -340,10 +341,10 @@ int main(int argc, char **argv) {
             << ", IC 0-" << IC_PAR-1 << ") ---" << std::endl;
 
   // Configuration
-  int check_ic_start = 0;      // First IC Tile starts at 0
-  int check_oc_start = 0;      // First OC Tile starts at 0
+  int check_oc_start = 16;      // First OC Tile starts at 0
   int strips_per_row = FM_WIDTH / PP_PAR;
   int total_strips   = TILE_HEIGHT * strips_per_row;
+  int quant_shift = 10;
 
   // Iterate through the strips in the order hardware produces them (Row-Major)
   for (int strip_idx = 0; strip_idx < total_strips; ++strip_idx) {
@@ -380,9 +381,7 @@ int main(int argc, char **argv) {
                                         (in_x < 0) || (in_x >= FM_WIDTH);
 
                       // 4. Loop over Input Channels (Partial Sum: 0 to IC_PAR-1)
-                      for (int local_ic = 0; local_ic < IC_PAR; ++local_ic) {
-                          int global_ic = check_ic_start + local_ic;
-
+                      for (int global_ic = 0; global_ic < FM_CHANNELS; ++global_ic) {
                           int16_t pixel_val = 0;
                           if (!is_padding) {
                               // Planar Layout Indexing [C][H][W]
@@ -403,7 +402,7 @@ int main(int argc, char **argv) {
                       }
                   }
               }
-	      int32_t quantized_val = accumulator >> 10;
+	      int32_t quantized_val = accumulator >> quant_shift;
 	      if (quantized_val > 127) quantized_val = 127;
 	      else if (quantized_val < -128) quantized_val = -128;
               strip_results[p][local_oc] = quantized_val; // accumulator;
@@ -424,6 +423,123 @@ int main(int argc, char **argv) {
       }
       std::cout << std::dec << std::endl;
   }
+  */
+  std::cout << "INFO: Reading output data from device..." << std::endl;
+  
+  // Calculate total output size
+  // Note: Hardware writes TILE_HEIGHT rows per tile. 
+  // If FM_HEIGHT is a multiple of TILE_HEIGHT, this matches the full image size.
+  size_t output_size_bytes = FM_HEIGHT * FM_WIDTH * OUT_CHANNELS * sizeof(int8_t);
+  
+  // Allocate Host Buffer (Aligned for OpenCL)
+  std::vector<int8_t, aligned_allocator<int8_t>> host_output_buffer(output_size_bytes);
 
+  // Enqueue Read Command
+  OCL_CHECK(err, err = q.enqueueReadBuffer(
+      device_output_buffer, // Buffer object
+      CL_TRUE,              // Blocking read
+      0,                    // Offset
+      output_size_bytes,    // Size
+      host_output_buffer.data(),
+      nullptr, nullptr));
+
+  // =========================================================================
+  // 6. VERIFY AGAINST GROUND TRUTH
+  // =========================================================================
+  std::cout << "INFO: Verifying results..." << std::endl;
+  
+  int errors = 0;
+  int max_errors_to_print = 20;
+  int linear_idx = 0; // Tracks position in the raw HBM buffer
+
+  // Quantization Shift (Must match Hardware)
+  int quant_shift = 10; 
+
+  // --- ITERATE IN HARDWARE WRITE ORDER ---
+  // 1. Height Tiles
+  for (int ht = 0; ht < FM_HEIGHT / TILE_HEIGHT; ++ht) {
+      
+      // 2. Output Channel Tiles
+      for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
+          
+          // 3. Rows inside the Tile
+          for (int r = 0; r < TILE_HEIGHT; ++r) {
+              
+              // 4. Width Strips (PP_PAR pixels per strip)
+              for (int w_strip = 0; w_strip < FM_WIDTH / PP_PAR; ++w_strip) {
+                  
+                  // 5. Pixels inside the Strip
+                  for (int p = 0; p < PP_PAR; ++p) {
+                      
+                      // 6. Output Channels inside the Block
+                      for (int o = 0; o < OC_PAR; ++o) {
+                          
+                          // --- A. Calculate Global Coordinates ---
+                          int global_h = (ht * TILE_HEIGHT) + r;
+                          int global_w = (w_strip * PP_PAR) + p;
+                          int global_oc = (ot * OC_PAR) + o;
+
+                          // --- B. Calculate Ground Truth (Software Conv) ---
+                          int32_t accumulator = 0;
+
+                          // Loop over Kernel (3x3)
+                          for (int ky = 0; ky < 3; ++ky) {
+                              for (int kx = 0; kx < 3; ++kx) {
+                                  int in_y = global_h + ky - 1; // Handle Padding
+                                  int in_x = global_w + kx - 1;
+                                  
+                                  bool is_padding = (in_y < 0) || (in_y >= FM_HEIGHT) || 
+                                                    (in_x < 0) || (in_x >= FM_WIDTH);
+
+                                  // Loop over ALL Input Channels
+                                  for (int ic = 0; ic < FM_CHANNELS; ++ic) {
+                                      int16_t pixel_val = 0;
+                                      if (!is_padding) {
+                                          // Input is Planar [C][H][W] (Matches your pack function)
+                                          int in_idx = (ic * FM_HEIGHT * FM_WIDTH) + 
+                                                       (in_y * FM_WIDTH) + in_x;
+                                          pixel_val = (int16_t)(int8_t)arr[in_idx];
+                                      }
+
+                                      // Weights are [OC][IC][3][3] (Matches your pack function)
+                                      int w_idx = (global_oc * FM_CHANNELS * 9) + 
+                                                  (ic * 9) + 
+                                                  (ky * 3 + kx);
+                                      int16_t weight_val = (int16_t)(int8_t)weight_arr[w_idx];
+
+                                      accumulator += (pixel_val * weight_val);
+                                  }
+                              }
+                          }
+
+                          // --- C. Quantize Ground Truth ---
+                          int32_t shifted = accumulator >> quant_shift;
+                          int8_t expected_val;
+                          if (shifted > 127) expected_val = 127;
+                          else if (shifted < -128) expected_val = -128;
+                          else expected_val = (int8_t)shifted;
+
+                          // --- D. Compare with Hardware Output ---
+                          // The linear_idx walks through the buffer in the exact order HW wrote it
+                          int8_t hw_val = host_output_buffer[linear_idx];
+                          
+                          if (hw_val != expected_val) {
+                              if (errors < max_errors_to_print) {
+                                  std::cout << "ERROR at [H=" << global_h << ", W=" << global_w 
+                                            << ", OC=" << global_oc << "]: "
+                                            << "Expected " << (int)expected_val 
+                                            << ", Got " << (int)hw_val 
+                                            << " (HBM Index " << linear_idx << ")" << std::endl;
+                              }
+                              errors++;
+                          }
+                          
+                          linear_idx++;
+                      }
+                  }
+              }
+          }
+      }
+  }
   return EXIT_SUCCESS;
 }

@@ -1,19 +1,18 @@
 `default_nettype none
 
 module vla_accel_top #(
-    parameter IMG_W = 8,
-    parameter IMG_H = 8,
-    parameter IMG_C = 32,
-
-    parameter OC    = 32,
+    parameter IMG_W = 128,
+    parameter IMG_H = 128,
+    parameter IMG_C = 64,
+    parameter OC    = 64,
 
     parameter IC_PAR = 16,
     parameter OC_PAR = 16,
-    parameter PP_PAR = 4,
+    parameter PP_PAR = 8,
     parameter DATA_WIDTH = 8,
 
     parameter MAX_IMG_WIDTH = 128,
-    parameter TILE_HEIGHT = 4,
+    parameter TILE_HEIGHT = 8,
     
     parameter C_M_AXI_GMEM_ADDR_WIDTH = 64,
     parameter C_M_AXI_GMEM_DATA_WIDTH = 512,
@@ -101,13 +100,13 @@ module vla_accel_top #(
 
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_feat_input_addr_base;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_input_addr_w;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = hbm_feat_input_addr_base + (hbm_input_addr_w << 6);  // * 128 since data width is 1024 bits = 128 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = hbm_feat_input_addr_base + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_weight_input_addr_base;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + (hbm_winput_addr << 6);  // * 128 since data width is 1024 bits = 128 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + (hbm_winput_addr << 6);
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_output_addr_base;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_foutput_addr;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = hbm_output_addr_base + (hbm_foutput_addr << 6);  // * 128 since data width is 1024 bits = 128 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = hbm_output_addr_base + (hbm_foutput_addr << 6);
 
     vla_accel_control_s_axi #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),

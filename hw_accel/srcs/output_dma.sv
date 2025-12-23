@@ -44,13 +44,14 @@ module output_dma #(
     
     // Stride Calculations (in Bytes)
     wire [63:0] bits_per_row = img_width * BITS_PER_PIXEL_BLOCK;
-    wire [63:0] bytes_per_row = bits_per_row / 8;
-    wire [63:0] stride_oc_tile_bytes = bytes_per_row * TILE_HEIGHT;
-    wire [63:0] stride_height_tile_bytes = stride_oc_tile_bytes * (oc_channels / OC_PAR);
+    wire [63:0] words_per_row = bits_per_row / HBM_DATA_WIDTH;
+
+    wire [63:0] stride_oc_tile_words = words_per_row * TILE_HEIGHT;
+    wire [63:0] stride_height_tile_words = stride_oc_tile_words * (oc_channels / OC_PAR);
 
     // Base Address for this Tile
-    wire [63:0] tile_base_addr = (tile_y_index * stride_height_tile_bytes) + 
-                                 (tile_oc_index * stride_oc_tile_bytes);
+    wire [63:0] tile_base_addr = (tile_y_index * stride_height_tile_words) + 
+                                 (tile_oc_index * stride_oc_tile_words);
 
     // Serialization Constants
     localparam QUANTIZED_BLOCK_WIDTH = PP_PAR * OC_PAR * DATA_WIDTH;

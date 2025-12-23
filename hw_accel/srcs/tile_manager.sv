@@ -47,8 +47,11 @@ module tile_manager #(
     output reg done
 );
 
+    // !! Used to iterate over tiles !!
     wire [15:0] num_tiles_y = full_img_height / TILE_HEIGHT;
     wire [15:0] num_tiles_ic = full_img_channels / IC_PAR;
+    wire [15:0] num_tiles_oc = output_channels / OC_PAR;
+    
     // --- INTERNAL URAMs ---
     // Input Buffer: Stores Tile + Halo
     // Size: (TILE_HEIGHT + 2) * MAX_IMG_WIDTH
@@ -214,7 +217,7 @@ module tile_manager #(
     end
     
     reg [3:0] state;
-    // --- MAIN FSM ---
+
     localparam S_IDLE = 0;
     localparam S_DMA_FM  = 1;
     localparam S_DMA_W   = 6;
@@ -338,7 +341,6 @@ module tile_manager #(
                     // Simple Valid/Ready Handshake
                     // We assume URAM read is 0-latency (Register file behavior for sim)
                     // In real HW, need 1-cycle read latency handling
-                    
                     if (stream_ptr < (TILE_HEIGHT + 2) * full_img_width_strips) begin
                         acc_din_valid <= 1;
                         acc_din_data <= uram_input[stream_ptr];
@@ -350,7 +352,6 @@ module tile_manager #(
                         acc_din_valid <= 0;
                         state <= S_ACC_WAIT;
                     end
-		    // state <= S_ACC_WAIT;
                 end
                 
                 // 4. Wait for Accelerator to Finish
@@ -368,6 +369,7 @@ module tile_manager #(
 		    if (current_tile_ic + 1 >= num_tiles_ic) begin
 			state <= S_WRITE_OUTPUT;
 			output_dma_start <= 1;      // Trigger Output DMA
+			current_tile_ic <= 0;
 		    end else begin
 			current_tile_ic <= current_tile_ic + 1;
 			dma_start <= 1;
@@ -380,13 +382,26 @@ module tile_manager #(
                     output_dma_start <= 0;
                     if (output_dma_done) begin
                         // Now we can move to the next OC Tile or Height Tile
-                        if (current_tile_y + 1 >= num_tiles_y) begin
-                            done <= 1;
-			    dma_start <= 0;
-			    weights_dma_start <= 0;
-                            state <= S_IDLE;
+                        if (current_tile_oc + 1 >= num_tiles_oc) begin
+			    // Done with all OC tiles for this Y
+			    // Next Y tile
+			    if (current_tile_y + 1 >= num_tiles_y) begin
+				// All done
+                                done <= 1;
+			        dma_start <= 0;
+			        weights_dma_start <= 0;
+                                state <= S_IDLE;
+			    end else begin
+				current_tile_y <= current_tile_y + 1;
+				current_tile_oc <= 0;
+				current_tile_ic <= 0;
+				// dma_start <= 1;
+				// weights_dma_start <= 1;
+				// state <= S_DMA_FM;
+				state <= S_INIT_URAM;
+			    end
                         end else begin
-                            current_tile_y <= current_tile_y + 1;
+                            current_tile_oc <= current_tile_oc + 1;
 			    current_tile_ic <= 0;
                             dma_start <= 1;
 			    weights_dma_start <= 1;
@@ -394,7 +409,6 @@ module tile_manager #(
                         end
                     end
                 end
-                
             endcase
         end
     end
@@ -458,7 +472,7 @@ module tile_manager #(
 	$fclose(ff_dump);
         $display("[SIM-DEBUG] Dump complete.");
 
-        wait(current_tile_ic == 1 && current_tile_y == 0);
+        wait(current_tile_oc == 0 && current_tile_y == 1 && current_tile_ic == 0);
 
 	#2;
 	
@@ -499,9 +513,7 @@ module tile_manager #(
             // Write the packed 8-bit hex string to file
             $fdisplay(f_dump, "%h", packed_quant_row);
         end
-        
         $fclose(f_dump);
-
     end
 `endif
 

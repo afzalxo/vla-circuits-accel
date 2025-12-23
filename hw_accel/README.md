@@ -101,7 +101,6 @@ Several critical bugs were resolved in the core logic to support this integratio
 *   **Computation:** First strip of the first tile matches Ground Truth bit-for-bit.
 *   **Accumulation:** SIMD-style accumulation of partial sums in the Tile Manager is functional.
 
-
 ### Re-quantization
 
 We get `ACC_WIDTH` output width after convolution of a tile. Since `ACC_WIDTH` is larger than the 8-bit output we want to store back, we need to re-quantize the output.
@@ -118,11 +117,11 @@ Please use the variable `quant_shift` in `tile_manager.sv` to set the appropriat
 
 ### Next Steps
 - [x]   **Halo Loading:** Implement automatic loading of "Halo" rows (Top/Bottom padding) in the DMA to support seamless vertical tiling without artifacts at tile boundaries (currently, the conv output at bottom boundaries of feature maps horizontal tiles is incorrect since we only load the current tile, whereas the output depends on the halo). **Update (21st December): Completed and verified.**
-- [ ]   **Looping over OC Tiles:** Extend the Tile Manager to loop over Output Channel tiles, enabling processing of arbitrary OC sizes (currently only processing the first OC tile).
-- [ ]   **Looping over H Tiles:** Extend the Tile Manager to loop over Height tiles, enabling processing of arbitrary image heights (currently only processing the first OC tile of the first H tile).
+- [x]   **Looping over OC Tiles:** Extend the Tile Manager to loop over Output Channel tiles, enabling processing of arbitrary OC sizes (currently only processing the first OC tile). **Update (23 Dec): (`tile_manager.sv`) Added looping over OC tiles (full output is now computed for all OC tiles)**
+- [x]   **Looping over H Tiles:** Extend the Tile Manager to loop over Height tiles, enabling processing of arbitrary image heights (currently only processing the first OC tile of the first H tile).  **Update (23 Dec): (`tile_manager.sv`) Added looping over H tiles (full image is now computed for all H tiles)**
 - [x]   **Storing Output of Current H Tile/OC Tile:** Implement logic to write back the completed output tile to HBM after processing all IC tiles for the current H/OC tile. **Update (23 Dec): (`output_dma.sv`) Added logic to write only the first H/OC tile (since looping over H/OC hasnt been implemented yet)**
 - [ ]   **Double Buffering:** Implement double buffering so the output storing of the current H/OC tile can occur in parallel with loading the next tile.
-- [ ]   **Full Image Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic and currect output computation for one conv layer.
+- [x]   **Full Image Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic and currect output computation for one conv layer.  **Update (23 Dec): Full image verification successful; Tested for various image sizes from H/W = 8/8 to H/W = 128/128 and for IC/OC = 16/16 to IC/OC = 64. Takes around 3ms for convolution between HxWxIC = 128x128x64 feature map with kernel of shape 3x3xICxOC = 3x3x64x64.**
 - [ ]   **ReLU Activation:** Integrate ReLU activation as a post-processing after computing current H/OC tile.
 - [x]   **Re-Quantization:** Implement re-quantization logic after ReLU to map outputs of accumulator bit-width (28-bits) back to int8 range. **Update (23rd December): Re-quantization/scaling of fmap outputs has been added (need to adjust the `quant_shift` variable according to data scale**)
 - [ ]   **Multi-Layer Support:** Extend accelerator to support multiple conv layers in sequence.
