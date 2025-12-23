@@ -43,7 +43,8 @@ module vla_accel_control_s_axi #(
 
     // output reg [NUM_SAMPLES_WIDTH-1:0]   reg_num_samples_out,
     output reg [63:0] reg_feat_input_addr,
-    output reg [63:0] reg_weight_input_addr
+    output reg [63:0] reg_weight_input_addr,
+    output reg [63:0] reg_feat_output_addr
 );
 
     //------------------------Address Info-------------------
@@ -56,6 +57,8 @@ module vla_accel_control_s_axi #(
     localparam ADDR_FEAT_INPUT_ADDR_HI   = 8'h18;
     localparam ADDR_WEIGHT_INPUT_ADDR_LO = 8'h1C;
     localparam ADDR_WEIGHT_INPUT_ADDR_HI = 8'h20;
+    localparam ADDR_FEAT_OUTPUT_ADDR_LO  = 8'h24;
+    localparam ADDR_FEAT_OUTPUT_ADDR_HI  = 8'h28;
 
     // AXI Write FSM States
     localparam WRIDLE = 2'd0, WRDATA = 2'd1, WRRESP = 2'd2, WRRESET = 2'd3;
@@ -221,6 +224,14 @@ end
 			$display("Input Weight Addr High Write");
 			reg_weight_input_addr[63:32] <= WDATA;
 		    end
+		    ADDR_FEAT_OUTPUT_ADDR_LO: begin
+			$display("Output Feat Addr Low Write");
+			reg_feat_output_addr[31:0] <= WDATA;
+		    end
+		    ADDR_FEAT_OUTPUT_ADDR_HI: begin
+			$display("Output Feat Addr High Write");
+			reg_feat_output_addr[63:32] <= WDATA;
+		    end
                     default: begin
 			$display("Default Write");
                     end
@@ -257,6 +268,14 @@ end
 		ADDR_WEIGHT_INPUT_ADDR_HI: begin
 		    $display("Weight Addr High Read");
 		    rdata_reg <= reg_weight_input_addr[63:32];
+		end
+		ADDR_FEAT_OUTPUT_ADDR_LO: begin
+		    $display("Output Addr Low Read");
+		    rdata_reg <= reg_feat_output_addr[31:0];
+		end
+		ADDR_FEAT_OUTPUT_ADDR_HI: begin
+		    $display("Output Addr High Read");
+		    rdata_reg <= reg_feat_output_addr[63:32];
 		end
 		default: begin
 		    $display("Default Read");

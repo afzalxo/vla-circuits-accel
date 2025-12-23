@@ -17,7 +17,7 @@ module weights_dma #(
     // Configuration
     input wire [15:0] oc,
     input wire [15:0] ic,
-    input wire [15:0] weight_words,
+    output wire [15:0] weight_words,
     input wire [15:0] ic_tile,   // Current IC tile index
     input wire [15:0] oc_tile,  //  Current OC tile
 

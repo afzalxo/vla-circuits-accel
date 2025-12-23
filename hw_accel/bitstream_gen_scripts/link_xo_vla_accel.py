@@ -96,6 +96,7 @@ vpp_connectivity_flags += f" --connectivity.nk vla_accel_top:1:vla_accel_top_0"
 # 2. Memory Connections (--connectivity.sp)
 vpp_connectivity_flags += f" --connectivity.sp vla_accel_top_0.m_axi_gmem:HBM[0]"
 vpp_connectivity_flags += f" --connectivity.sp vla_accel_top_0.m_axi_wgmem:HBM[1]"
+vpp_connectivity_flags += f" --connectivity.sp vla_accel_top_0.m_axi_fo_gmem:HBM[2]"
 
 # For clarity, print the final generated flags
 print(vpp_connectivity_flags)

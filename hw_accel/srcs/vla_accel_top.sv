@@ -64,8 +64,23 @@ module vla_accel_top #(
     input  wire                                         m_axi_wgmem_rvalid,
     output wire                                         m_axi_wgmem_rready,
     input  wire  [C_M_AXI_GMEM_DATA_WIDTH-1:0]          m_axi_wgmem_rdata,
-    input  wire       					m_axi_wgmem_rlast
+    input  wire       					m_axi_wgmem_rlast,
 
+    // AXI Master Interface for Global Memory Writes for Output Feature Map
+    output wire       					m_axi_fo_gmem_awvalid,
+    input  wire                                         m_axi_fo_gmem_awready,
+    output wire  [C_M_AXI_GMEM_ADDR_WIDTH-1:0]          m_axi_fo_gmem_awaddr,
+    output wire  [7:0]                                  m_axi_fo_gmem_awlen,
+    output wire  [2:0]                                  m_axi_fo_gmem_awsize,
+    output wire  [1:0]                                  m_axi_fo_gmem_awburst,
+    output wire                                         m_axi_fo_gmem_wvalid,
+    input  wire                                         m_axi_fo_gmem_wready,
+    output wire  [C_M_AXI_GMEM_DATA_WIDTH-1:0]          m_axi_fo_gmem_wdata,
+    output wire  [C_M_AXI_GMEM_DATA_WIDTH/8-1:0]        m_axi_fo_gmem_wstrb,
+    output wire                                         m_axi_fo_gmem_wlast,
+    input  wire  [1:0]                                	m_axi_fo_gmem_bresp,
+    input  wire                                         m_axi_fo_gmem_bvalid,
+    output wire                                         m_axi_fo_gmem_bready
 ); 
 
     // Start, ready and done signals
@@ -90,6 +105,9 @@ module vla_accel_top #(
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_weight_input_addr_base;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + (hbm_winput_addr << 6);  // * 128 since data width is 1024 bits = 128 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_output_addr_base;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_foutput_addr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = hbm_output_addr_base + (hbm_foutput_addr << 6);  // * 128 since data width is 1024 bits = 128 bytes per burst
 
     vla_accel_control_s_axi #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),
@@ -117,6 +135,7 @@ module vla_accel_top #(
 	.RREADY(s_axi_control_rready),
 	.reg_feat_input_addr(hbm_feat_input_addr_base),
 	.reg_weight_input_addr(hbm_weight_input_addr_base),
+	.reg_feat_output_addr(hbm_output_addr_base),
         .user_start(start_process_internal), // Controller generates start pulse
         .user_done(process_done_internal),     // Core logic signals completion
 	.user_idle(ap_idle),
@@ -156,6 +175,7 @@ module vla_accel_top #(
     wire read_master_weights_data_valid;
     wire hbm_wread_start;
     wire hbm_wload_done;
+    wire hbm_fwrite_start;
     wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] read_master_weights_data_out;
     wire [15:0] weight_words;
 
@@ -183,6 +203,40 @@ module vla_accel_top #(
         .done(hbm_wload_done)
     );
 
+    wire [15:0] output_feature_map_words;
+    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] write_master_fmap_data_in;
+    wire write_master_fmap_data_valid;
+    wire write_master_fmap_data_ready;
+    wire hbm_fwrite_done;
+    burst_axi_write_master #(
+	.AXI_ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
+	.AXI_DATA_WIDTH(C_M_AXI_GMEM_DATA_WIDTH)
+    ) hbm_output_wr_master_inst (
+	.clk(ap_clk),
+	.rst_n(ap_rst_n),
+	.start(hbm_fwrite_start),
+	.base_address(hbm_write_f_addr),
+	.total_words_to_write(output_feature_map_words),
+	.data_in(write_master_fmap_data_in),
+	.data_valid(write_master_fmap_data_valid),
+	.data_ready(write_master_fmap_data_ready),
+	.m_axi_awvalid(m_axi_fo_gmem_awvalid),
+	.m_axi_awready(m_axi_fo_gmem_awready),
+	.m_axi_awaddr(m_axi_fo_gmem_awaddr),
+	.m_axi_awlen(m_axi_fo_gmem_awlen),
+	.m_axi_awsize(m_axi_fo_gmem_awsize),
+	.m_axi_awburst(m_axi_fo_gmem_awburst),
+	.m_axi_wvalid(m_axi_fo_gmem_wvalid),
+	.m_axi_wready(m_axi_fo_gmem_wready),
+	.m_axi_wdata(m_axi_fo_gmem_wdata),
+	.m_axi_wstrb(m_axi_fo_gmem_wstrb),
+	.m_axi_wlast(m_axi_fo_gmem_wlast),
+	.m_axi_bvalid(m_axi_fo_gmem_bvalid),
+	.m_axi_bready(m_axi_fo_gmem_bready),
+	.m_axi_bresp(m_axi_fo_gmem_bresp),
+	.done(hbm_fwrite_done)
+    );
+
     tile_manager #(
 	.IC_PAR(IC_PAR),
 	.OC_PAR(OC_PAR),
@@ -202,6 +256,7 @@ module vla_accel_top #(
 	.output_channels(OC),
 	.feature_map_words(feature_map_words),
 	.weight_words(weight_words),
+	.fmap_out_words(output_feature_map_words),
 	// FMap HBM interface	
 	.hbm_data_in(read_master_data_out),
 	.hbm_addr(hbm_input_addr_w),
@@ -212,6 +267,13 @@ module vla_accel_top #(
 	.hbm_addr_w(hbm_winput_addr),
 	.hbm_ren_w(hbm_wread_start),
 	.hbm_rvalid_w(read_master_weights_data_valid),
+	// Output FMap HBM interface
+	.hbm_fmap_out_data(write_master_fmap_data_in),
+	.hbm_fmap_out_addr(hbm_foutput_addr),
+	.hbm_fmap_out_wen(hbm_fwrite_start),
+	.hbm_fmap_wvalid(write_master_fmap_data_valid),
+	.hbm_fmap_out_ready(write_master_fmap_data_ready),
+	.hbm_fmap_out_done(hbm_fwrite_done),
 	.done(process_done_internal)
     );
 

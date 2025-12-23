@@ -271,6 +271,7 @@ int main(int argc, char **argv) {
   std::cout << "INFO: Kernel created" << std::endl;
 
   size_t input_buffer_size_bytes =  FM_WIDTH * FM_HEIGHT * FM_CHANNELS;
+  size_t output_buffer_size_bytes = FM_WIDTH * FM_HEIGHT * OUT_CHANNELS;
 
   uint8_t arr[FM_WIDTH*FM_HEIGHT*FM_CHANNELS]; 
   uint8_t packed_arr[FM_WIDTH * FM_HEIGHT * FM_CHANNELS];
@@ -292,6 +293,11 @@ int main(int argc, char **argv) {
   OCL_CHECK(err, cl::Buffer device_input_buffer(
 	      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 	      input_buffer_size_bytes, host_input_buffer.data(), &err));
+
+  // Create output buffer
+  OCL_CHECK(err, cl::Buffer device_output_buffer(
+	      context, CL_MEM_WRITE_ONLY,
+	      output_buffer_size_bytes, NULL, &err));
 
   // --- Prepare Weight Buffer ---
   size_t weight_buffer_size_bytes = FM_CHANNELS * OUT_CHANNELS * 3 * 3;
@@ -316,6 +322,7 @@ int main(int argc, char **argv) {
   std::cout << "INFO: Setting kernel arguments..." << std::endl;
   OCL_CHECK(err, err = vlaAccelKernel.setArg(0, device_input_buffer));
   OCL_CHECK(err, err = vlaAccelKernel.setArg(1, device_weight_buffer));
+  OCL_CHECK(err, err = vlaAccelKernel.setArg(2, device_output_buffer));
   // --- Execute Kernels ---
   // Enqueue tasks. Streams handle synchronization.
   // Using Out-of-Order queue allows runtime to potentially overlap execution.
@@ -396,7 +403,10 @@ int main(int argc, char **argv) {
                       }
                   }
               }
-              strip_results[p][local_oc] = accumulator;
+	      int32_t quantized_val = accumulator >> 10;
+	      if (quantized_val > 127) quantized_val = 127;
+	      else if (quantized_val < -128) quantized_val = -128;
+              strip_results[p][local_oc] = quantized_val; // accumulator;
           }
       }
 
@@ -408,8 +418,8 @@ int main(int argc, char **argv) {
       // Hardware packing: P=0,OC=0 is LSB. P=3,OC=15 is MSB.
       for (int p = PP_PAR - 1; p >= 0; --p) {
           for (int o = OC_PAR - 1; o >= 0; --o) {
-              uint32_t val = strip_results[p][o] & 0x0FFFFFFF; // Mask to 28 bits
-              std::cout << std::hex << std::setw(7) << std::setfill('0') << val;
+              uint32_t val = strip_results[p][o] & 0x000000FF; // Mask to 28 bits 0x0FFFFFFF
+              std::cout << std::hex << std::setw(2) << std::setfill('0') << val;   //setw(7)
           }
       }
       std::cout << std::dec << std::endl;

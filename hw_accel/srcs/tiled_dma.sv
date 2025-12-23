@@ -139,7 +139,7 @@ module tiled_dma #(
                 end
 
                 S_READ: begin
-                   if (hbm_rvalid) begin
+                    if (hbm_rvalid) begin
                         uram_wdata[uram_beat_count * HBM_DATA_WIDTH +: HBM_DATA_WIDTH] <= hbm_data_in;
                         
                         if (uram_beat_count == BEATS_PER_URAM_IDX - 1) begin

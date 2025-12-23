@@ -43,3 +43,5 @@ Please see directory `hw_accel`.
 ## 21 Dec (Further update on HW Accelerator):
 
 Added Memory Subsystem Integration and Hardware Emulation. Please see directory `hw_accel`.
+
+## 23 Dec (HW Accel)
