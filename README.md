@@ -47,3 +47,7 @@ Added Memory Subsystem Integration and Hardware Emulation. Please see directory 
 ## 23 Dec (HW Accel)
 
 Convolution of full 128x128x64 feature map with 3x3x64x64 kernel implemented and verified. Takes around 3ms for this size. Perf can be improved using certain optimization techniques like double buffer (WIP). 
+
+## 26 Dec (HW Accel)
+
+Added multi-layer support and a basic ISA that allows `CONV` and `HALT` instructions for host-configured multi-layer support. The host writes the instruction packet to the HBM[0] heap space (first 64KB). The accelerator reads the instructions, executes each layer sequentially until it encounters `HALT`. Tested and verified using 1-3 conv layers.
