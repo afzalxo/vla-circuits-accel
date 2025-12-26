@@ -39,6 +39,7 @@ module instruction_scheduler #(
     output reg [15:0] cfg_out_channels,
     output reg [4:0]  cfg_quant_shift,
     output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
+    output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_input_bank,
     output reg [1:0]  cfg_output_bank
 );
@@ -90,6 +91,7 @@ module instruction_scheduler #(
             cfg_out_channels <= 0;
             cfg_quant_shift <= 0;
             cfg_is_conv <= 0;
+	    cfg_relu_en <= 0;
         end else begin
             // Default Pulses
             tm_start <= 0;
@@ -140,6 +142,9 @@ module instruction_scheduler #(
                     // [255:240] Out Channels
                     // [263:256] Opcode
                     // [271:264] Quant Shift
+		    // [279:272] Bank Select (2 LSB bits input, next 2 bits
+		    // output)
+		    // [280] ReLU Enable
                     
                     cfg_input_addr   <= instr_reg[63:0];
                     cfg_output_addr  <= instr_reg[127:64];
@@ -165,6 +170,7 @@ module instruction_scheduler #(
 
 		    cfg_input_bank  <= instr_reg[273:272];
 		    cfg_output_bank <= instr_reg[275:274];
+		    cfg_relu_en     <= instr_reg[280];
                 end
 
                 // 4. Execute Layer

@@ -17,6 +17,8 @@
 
 #include "ap_int.h"
 
+constexpr uint16_t NUM_LAYERS = 3;
+
 constexpr uint16_t FM_WIDTH = 64;    // Feature map width
 constexpr uint16_t FM_HEIGHT = 64;   // Feature map height
  
@@ -81,7 +83,8 @@ struct alignas(64) NISA_Instruction {
     uint8_t  opcode;         // [263:256]
     uint8_t  quant_shift;    // [271:264]
     uint8_t  bank_sel;       // [279:272] select HBM input/output bank for this layer
-    uint8_t  padding[21];    // Pad to 64 bytes total
+    uint8_t  relu_en;        // [287:280] ReLU enable flag
+    uint8_t  padding[28];    // Pad to 64 bytes total
 };
 
 /**
@@ -246,7 +249,8 @@ std::vector<int8_t> compute_gold_conv_layer(
     const std::vector<int8_t>& input,
     const std::vector<int8_t>& weights,
     int H, int W, int IC, int OC,
-    int quant_shift
+    int quant_shift,
+    int relu_en
 ) {
     std::vector<int8_t> output(OC * H * W);
 
@@ -283,6 +287,9 @@ std::vector<int8_t> compute_gold_conv_layer(
                     }
                 }
 
+		if (relu_en == 1) {
+		    if (accumulator < 0) accumulator = 0;
+		}
                 // Quantization (Scale & Clamp)
                 int32_t shifted = accumulator >> quant_shift;
                 int8_t result;
@@ -385,6 +392,7 @@ int main(int argc, char **argv) {
   instr_list[0].out_channels  = OUT_CHANNELS;
   instr_list[0].opcode        = OP_CONV;
   instr_list[0].bank_sel      = 0x04;  // 0b0100: HBM1 output, HBM0 input
+  instr_list[0].relu_en       = 1;
   instr_list[0].quant_shift   = 10;
   // Instruction 1: Conv Layer 1
   instr_list[1].input_offset  = 0;
@@ -396,6 +404,7 @@ int main(int argc, char **argv) {
   instr_list[1].out_channels  = OUT_CHANNELS;
   instr_list[1].opcode        = OP_CONV;
   instr_list[1].bank_sel      = 0x09;  // 0b1001: HBM2 output, HBM1 input
+  instr_list[1].relu_en       = 1;
   instr_list[1].quant_shift   = 10;
   // Instruction 2: Conv Layer 2
   instr_list[2].input_offset  = 0;
@@ -407,6 +416,7 @@ int main(int argc, char **argv) {
   instr_list[2].out_channels  = OUT_CHANNELS;
   instr_list[2].opcode        = OP_CONV;
   instr_list[2].bank_sel      = 0x06;  // 0b0110: HBM1 output, HBM2 input
+  instr_list[2].relu_en       = 1;
   instr_list[2].quant_shift   = 10;
 
   // HALT Instruction
@@ -458,9 +468,19 @@ int main(int argc, char **argv) {
   // Allocate Host Buffer (Aligned for OpenCL)
   std::vector<int8_t, aligned_allocator<int8_t>> host_output_buffer(output_size_bytes);
 
+  cl::Buffer* final_buffer_ptr;
+    
+  if (NUM_LAYERS % 2 != 0) {
+      std::cout << "INFO: Odd layers. Reading output from Buffer A (HBM[1])." << std::endl;
+      final_buffer_ptr = &dev_buf_a;
+  } else {
+      std::cout << "INFO: Even layers. Reading output from Buffer B (HBM[2])." << std::endl;
+      final_buffer_ptr = &dev_buf_b;
+  }
+
   // Enqueue Read Command
   OCL_CHECK(err, err = q.enqueueReadBuffer(
-      dev_buf_a,            // Buffer object
+      *final_buffer_ptr,            // Buffer object
       CL_TRUE,              // Blocking read
       0, // INSTR_SECTION_SIZE,   // Offset
       output_size_bytes,    // Size
@@ -472,102 +492,6 @@ int main(int argc, char **argv) {
   // 6. VERIFY AGAINST GROUND TRUTH
   // =========================================================================
   std::cout << "INFO: Verifying results..." << std::endl;
-
-  /*
-  int errors = 0;
-  int max_errors_to_print = 20;
-  int linear_idx = 0; // Tracks position in the raw HBM buffer
-
-  // Quantization Shift (Must match Hardware)
-  int quant_shift = 10; 
-
-  // --- ITERATE IN HARDWARE WRITE ORDER ---
-  // 1. Height Tiles
-  for (int ht = 0; ht < FM_HEIGHT / TILE_HEIGHT; ++ht) {
-      
-      // 2. Output Channel Tiles
-      for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
-          
-          // 3. Rows inside the Tile
-          for (int r = 0; r < TILE_HEIGHT; ++r) {
-              
-              // 4. Width Strips (PP_PAR pixels per strip)
-              for (int w_strip = 0; w_strip < FM_WIDTH / PP_PAR; ++w_strip) {
-                  
-                  // 5. Pixels inside the Strip
-                  for (int p = 0; p < PP_PAR; ++p) {
-                      
-                      // 6. Output Channels inside the Block
-                      for (int o = 0; o < OC_PAR; ++o) {
-                          
-                          // --- A. Calculate Global Coordinates ---
-                          int global_h = (ht * TILE_HEIGHT) + r;
-                          int global_w = (w_strip * PP_PAR) + p;
-                          int global_oc = (ot * OC_PAR) + o;
-
-                          // --- B. Calculate Ground Truth (Software Conv) ---
-                          int32_t accumulator = 0;
-
-                          // Loop over Kernel (3x3)
-                          for (int ky = 0; ky < 3; ++ky) {
-                              for (int kx = 0; kx < 3; ++kx) {
-                                  int in_y = global_h + ky - 1; // Handle Padding
-                                  int in_x = global_w + kx - 1;
-                                  
-                                  bool is_padding = (in_y < 0) || (in_y >= FM_HEIGHT) || 
-                                                    (in_x < 0) || (in_x >= FM_WIDTH);
-
-                                  // Loop over ALL Input Channels
-                                  for (int ic = 0; ic < FM_CHANNELS; ++ic) {
-                                      int16_t pixel_val = 0;
-                                      if (!is_padding) {
-                                          // Input is Planar [C][H][W] (Matches your pack function)
-                                          int in_idx = (ic * FM_HEIGHT * FM_WIDTH) + 
-                                                       (in_y * FM_WIDTH) + in_x;
-                                          pixel_val = (int16_t)(int8_t)raw_input[in_idx];
-                                      }
-
-                                      // Weights are [OC][IC][3][3] (Matches your pack function)
-                                      int w_idx = (global_oc * FM_CHANNELS * 9) + 
-                                                  (ic * 9) + 
-                                                  (ky * 3 + kx);
-                                      int16_t weight_val = (int16_t)(int8_t)weight_arr[w_idx];
-
-                                      accumulator += (pixel_val * weight_val);
-                                  }
-                              }
-                          }
-
-                          // --- C. Quantize Ground Truth ---
-                          int32_t shifted = accumulator >> quant_shift;
-                          int8_t expected_val;
-                          if (shifted > 127) expected_val = 127;
-                          else if (shifted < -128) expected_val = -128;
-                          else expected_val = (int8_t)shifted;
-
-                          // --- D. Compare with Hardware Output ---
-                          // The linear_idx walks through the buffer in the exact order HW wrote it
-                          int8_t hw_val = host_output_buffer[linear_idx];
-                          
-                          if (hw_val != expected_val) {
-                              if (errors < max_errors_to_print) {
-                                  std::cout << "ERROR at [H=" << global_h << ", W=" << global_w 
-                                            << ", OC=" << global_oc << "]: "
-                                            << "Expected " << (int)expected_val 
-                                            << ", Got " << (int)hw_val 
-                                            << " (HBM Index " << linear_idx << ")" << std::endl;
-                              }
-                              errors++;
-                          }
-                          
-                          linear_idx++;
-                      }
-                  }
-              }
-          }
-      }
-  }
-*/
 
     // True verification starts here:
     // 1. Prepare Data Containers
@@ -593,20 +517,23 @@ int main(int argc, char **argv) {
     std::vector<int8_t> golden_L1 = compute_gold_conv_layer(
         input_L1, weights_L1, 
         FM_HEIGHT, FM_WIDTH, FM_CHANNELS, OUT_CHANNELS, 
-        10 // quant_shift
+        10, // quant_shift
+	1 // relu_en
     );
 
     std::cout << "INFO: Computing Golden Model for Layer 2..." << std::endl;
     std::vector<int8_t> golden_L2 = compute_gold_conv_layer(
         golden_L1, weights_L2, // Input is Output of L1
         FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
-        10 // quant_shift
+        10, // quant_shift
+	1 // relu_en
     );
 
     std::vector<int8_t> golden_L3 = compute_gold_conv_layer(
 	golden_L2, weights_L2, // Input is Output of L2
 	FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
-	10 // quant_shift
+	10, // quant_shift
+	1
     );
 
     // 3. Verify Final Result

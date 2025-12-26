@@ -24,6 +24,7 @@ module tile_manager #(
     output wire [15:0] weight_words,
     output wire [15:0] fmap_out_words,
     
+    input wire relu_en,
     // Input FMap DMA Interface
     input wire [PP_PAR*IC_PAR*DATA_WIDTH-1:0] hbm_data_in,
     output wire [63:0] hbm_addr,
@@ -170,6 +171,7 @@ module tile_manager #(
 	.oc_channels(output_channels),
 	.tile_y_index(current_tile_y),
 	.tile_oc_index(current_tile_oc),
+	.relu_en(relu_en),
 	.write_count(fmap_out_words),
 	.uram_addr(dma_uram_fmap_out_addr),
 	.uram_rdata(dma_fmap_out_wdata),

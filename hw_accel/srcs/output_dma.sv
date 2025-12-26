@@ -22,6 +22,7 @@ module output_dma #(
     input wire [15:0] tile_y_index,   // Current Vertical Tile
     input wire [15:0] tile_oc_index,  // Current Output Channel Tile
 
+    input wire relu_en,
     // URAM Interface (Read Port)
     output reg [15:0] uram_addr,
     input wire [URAM_WIDTH-1:0] uram_rdata,
@@ -69,6 +70,10 @@ module output_dma #(
                 reg signed [DATA_WIDTH-1:0] final_val;
                 
                 acc_val = uram_rdata[((p*OC_PAR + o)*ACCUM_WIDTH) +: ACCUM_WIDTH];
+
+		if (relu_en && acc_val[ACCUM_WIDTH-1]) begin // Check Sign Bit
+                    acc_val = 0;
+                end
                 
                 // 2. Arithmetic Shift (Preserves Sign)
                 shifted_val = acc_val >>> quant_shift;
