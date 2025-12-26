@@ -293,6 +293,7 @@ module tile_manager #(
             acc_start <= 0;
             case (state)
                 S_IDLE: begin
+		    done <= 0;
                     if (start) begin
                         current_tile_y <= 0;
 			current_tile_ic <= 0;
@@ -395,9 +396,6 @@ module tile_manager #(
 				current_tile_y <= current_tile_y + 1;
 				current_tile_oc <= 0;
 				current_tile_ic <= 0;
-				// dma_start <= 1;
-				// weights_dma_start <= 1;
-				// state <= S_DMA_FM;
 				state <= S_INIT_URAM;
 			    end
                         end else begin

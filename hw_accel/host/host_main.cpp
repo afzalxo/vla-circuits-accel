@@ -17,8 +17,8 @@
 
 #include "ap_int.h"
 
-constexpr uint16_t FM_WIDTH = 128;    // Feature map width
-constexpr uint16_t FM_HEIGHT = 128;   // Feature map height
+constexpr uint16_t FM_WIDTH = 64;    // Feature map width
+constexpr uint16_t FM_HEIGHT = 64;   // Feature map height
  
 constexpr uint16_t FM_CHANNELS = 64;
 constexpr uint16_t OUT_CHANNELS = 64;
@@ -27,7 +27,7 @@ constexpr uint16_t IC_PAR = 16;
 constexpr uint16_t OC_PAR = 16;
 constexpr uint16_t PP_PAR = 8;
 
-constexpr uint16_t TILE_HEIGHT = 8;
+constexpr uint16_t TILE_HEIGHT = 4;
 
 constexpr uint16_t FP_WIDTH = 16;
 constexpr uint16_t FP_FRAC_BITS = 8;
@@ -61,6 +61,28 @@ void dump_to_hex_file(const T* data, int bytes_per_line, int length_of_data, con
     f.close();
     std::cout << "Dumped " << filename << " (" << bytes_per_line << " bytes per line)" << std::endl;
 }
+
+constexpr size_t INSTR_SECTION_SIZE = 64 * 1024; // 64 KB reserved for instructions
+
+// Opcode Definitions
+constexpr uint8_t OP_CONV = 1;
+constexpr uint8_t OP_HALT = 255;
+
+// --- N-ISA INSTRUCTION STRUCT ---
+// Must match the bit slicing in instruction_scheduler.sv
+struct alignas(64) NISA_Instruction {
+    uint64_t input_offset;   // [63:0]   - Byte offset from Heap Base (HBM0)
+    uint64_t output_offset;  // [127:64] - Byte offset from Output Base (HBM2)
+    uint64_t weight_offset;  // [191:128]- Byte offset from Weight Base (HBM1)
+    uint16_t width;          // [207:192]
+    uint16_t height;         // [223:208]
+    uint16_t in_channels;    // [239:224]
+    uint16_t out_channels;   // [255:240]
+    uint8_t  opcode;         // [263:256]
+    uint8_t  quant_shift;    // [271:264]
+    uint8_t  bank_sel;       // [279:272] select HBM input/output bank for this layer
+    uint8_t  padding[21];    // Pad to 64 bytes total
+};
 
 /**
  * Packs feature map data from standard layout to HBM-optimized tiled layout.
@@ -217,6 +239,65 @@ void pack_weights(const T* src, T* dst,
     }
 }
 
+// Helper: Perform software convolution (Reference Model)
+// Input/Output Layout: Planar [Channels][Height][Width]
+// Weight Layout: [OutCh][InCh][3][3]
+std::vector<int8_t> compute_gold_conv_layer(
+    const std::vector<int8_t>& input,
+    const std::vector<int8_t>& weights,
+    int H, int W, int IC, int OC,
+    int quant_shift
+) {
+    std::vector<int8_t> output(OC * H * W);
+
+    // Loop over Output Channels
+    for (int oc = 0; oc < OC; ++oc) {
+        // Loop over Spatial Dimensions
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                
+                int32_t accumulator = 0;
+
+                // Convolution (3x3)
+                for (int ky = 0; ky < 3; ++ky) {
+                    for (int kx = 0; kx < 3; ++kx) {
+                        int in_y = y + ky - 1; // Padding handling (3x3 specific)
+                        int in_x = x + kx - 1;
+
+                        bool is_pad = (in_y < 0 || in_y >= H || in_x < 0 || in_x >= W);
+
+                        for (int ic = 0; ic < IC; ++ic) {
+                            int16_t pixel_val = 0;
+                            if (!is_pad) {
+                                // Input Index: [IC][H][W]
+                                int in_idx = (ic * H * W) + (in_y * W) + in_x;
+                                pixel_val = input[in_idx];
+                            }
+
+                            // Weight Index: [OC][IC][3][3]
+                            int w_idx = (oc * IC * 9) + (ic * 9) + (ky * 3 + kx);
+                            int16_t weight_val = weights[w_idx];
+
+                            accumulator += pixel_val * weight_val;
+                        }
+                    }
+                }
+
+                // Quantization (Scale & Clamp)
+                int32_t shifted = accumulator >> quant_shift;
+                int8_t result;
+                if (shifted > 127) result = 127;
+                else if (shifted < -128) result = -128;
+                else result = (int8_t)shifted;
+
+                // Output Index: [OC][H][W]
+                int out_idx = (oc * H * W) + (y * W) + x;
+                output[out_idx] = result;
+            }
+        }
+    }
+    return output;
+}
 
 // Helper to convert float to our fixed-point representation
 int16_t float_to_fixed(double val) {
@@ -272,34 +353,17 @@ int main(int argc, char **argv) {
 
   size_t input_buffer_size_bytes =  FM_WIDTH * FM_HEIGHT * FM_CHANNELS;
   size_t output_buffer_size_bytes = FM_WIDTH * FM_HEIGHT * OUT_CHANNELS;
+  size_t fmap_size = FM_WIDTH * FM_HEIGHT * FM_CHANNELS;
 
-  uint8_t arr[FM_WIDTH*FM_HEIGHT*FM_CHANNELS]; 
-  uint8_t packed_arr[FM_WIDTH * FM_HEIGHT * FM_CHANNELS];
-  
+  std::vector<uint8_t> raw_input(fmap_size);
   for (size_t i = 0; i < FM_WIDTH*FM_HEIGHT*FM_CHANNELS; i++) {
-      arr[i] = uint8_t(i); // Example data initialization
+      raw_input[i] = uint8_t(i);
   }
+  size_t heap_buffer_size = INSTR_SECTION_SIZE + input_buffer_size_bytes;
+  std::vector<uint8_t, aligned_allocator<uint8_t>> host_heap(heap_buffer_size);
+  pack_feature_map<uint8_t>(raw_input.data(), host_heap.data() + INSTR_SECTION_SIZE, 
+			    FM_HEIGHT, FM_WIDTH, FM_CHANNELS, TILE_HEIGHT, IC_PAR);
 
-  pack_feature_map<uint8_t>(arr, packed_arr, FM_HEIGHT, FM_WIDTH, FM_CHANNELS, TILE_HEIGHT, IC_PAR);
-
-  std::cout << "\nFirst 16 output bytes (Tile 0, Slot 0, Row 0, All Widths):" << std::endl;
-  for (int i = 0; i < 16; ++i) {
-      std::cout << (int)packed_arr[i] << " ";
-  }
-  std::cout << std::endl;
-
-  std::vector<uint8_t, aligned_allocator<uint8_t>> host_input_buffer(packed_arr, packed_arr + sizeof(packed_arr) / sizeof(packed_arr[0]));
-
-  OCL_CHECK(err, cl::Buffer device_input_buffer(
-	      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-	      input_buffer_size_bytes, host_input_buffer.data(), &err));
-
-  // Create output buffer
-  OCL_CHECK(err, cl::Buffer device_output_buffer(
-	      context, CL_MEM_WRITE_ONLY,
-	      output_buffer_size_bytes, NULL, &err));
-
-  // --- Prepare Weight Buffer ---
   size_t weight_buffer_size_bytes = FM_CHANNELS * OUT_CHANNELS * 3 * 3;
   uint8_t weight_arr[FM_CHANNELS * OUT_CHANNELS * 3 * 3];
   uint8_t packed_weight_arr[FM_CHANNELS * OUT_CHANNELS * 3 * 3];
@@ -308,21 +372,74 @@ int main(int argc, char **argv) {
   }
   pack_weights<uint8_t>(weight_arr, packed_weight_arr, OUT_CHANNELS, FM_CHANNELS, OC_PAR, IC_PAR);
 
-
   std::vector<uint8_t, aligned_allocator<uint8_t>> host_weight_buffer(packed_weight_arr, packed_weight_arr + sizeof(packed_weight_arr) / sizeof(packed_weight_arr[0]));
 
-  dump_to_hex_file(packed_weight_arr, OC_PAR * IC_PAR, 3*3*IC_PAR*OC_PAR, "golden_weights.hex");
-  dump_to_hex_file(packed_arr, IC_PAR * PP_PAR, 8 * PP_PAR * IC_PAR, "golden_features.hex");
+  NISA_Instruction instr_list[4];
+  // Instruction 0: Conv Layer 0
+  instr_list[0].input_offset  = INSTR_SECTION_SIZE; // Data starts after 64KB
+  instr_list[0].output_offset = 0;                  // Output starts at 0 of HBM[2]
+  instr_list[0].weight_offset = 0;                  // Weights start at 0 of HBM[1]
+  instr_list[0].width         = FM_WIDTH;
+  instr_list[0].height        = FM_HEIGHT;
+  instr_list[0].in_channels   = FM_CHANNELS;
+  instr_list[0].out_channels  = OUT_CHANNELS;
+  instr_list[0].opcode        = OP_CONV;
+  instr_list[0].bank_sel      = 0x04;  // 0b0100: HBM1 output, HBM0 input
+  instr_list[0].quant_shift   = 10;
+  // Instruction 1: Conv Layer 1
+  instr_list[1].input_offset  = 0;
+  instr_list[1].output_offset = 0;
+  instr_list[1].weight_offset = 0;
+  instr_list[1].width         = FM_WIDTH;
+  instr_list[1].height        = FM_HEIGHT;
+  instr_list[1].in_channels   = FM_CHANNELS;
+  instr_list[1].out_channels  = OUT_CHANNELS;
+  instr_list[1].opcode        = OP_CONV;
+  instr_list[1].bank_sel      = 0x09;  // 0b1001: HBM2 output, HBM1 input
+  instr_list[1].quant_shift   = 10;
+  // Instruction 2: Conv Layer 2
+  instr_list[2].input_offset  = 0;
+  instr_list[2].output_offset = 0;
+  instr_list[2].weight_offset = 0;
+  instr_list[2].width         = FM_WIDTH;
+  instr_list[2].height        = FM_HEIGHT;
+  instr_list[2].in_channels   = FM_CHANNELS;
+  instr_list[2].out_channels  = OUT_CHANNELS;
+  instr_list[2].opcode        = OP_CONV;
+  instr_list[2].bank_sel      = 0x06;  // 0b0110: HBM1 output, HBM2 input
+  instr_list[2].quant_shift   = 10;
 
-  OCL_CHECK(err, cl::Buffer device_weight_buffer(
+  // HALT Instruction
+  instr_list[3].opcode        = OP_HALT;
+
+  std::cout << "Size of instr_list: %zu bytes" << sizeof(instr_list) << std::endl;
+  memcpy(host_heap.data(), instr_list, sizeof(instr_list));
+
+  OCL_CHECK(err, cl::Buffer dev_heap(
+	      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+	      heap_buffer_size, host_heap.data(), &err));
+
+  OCL_CHECK(err, cl::Buffer dev_buf_a(
+	      context, CL_MEM_READ_WRITE,
+	      output_buffer_size_bytes, NULL, &err));
+
+  OCL_CHECK(err, cl::Buffer dev_buf_b(
+	      context, CL_MEM_READ_WRITE,
+	      output_buffer_size_bytes, NULL, &err));
+
+  OCL_CHECK(err, cl::Buffer dev_buf_weights(
 	      context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
 	      weight_buffer_size_bytes, host_weight_buffer.data(), &err));
+
+  // dump_to_hex_file(packed_weight_arr, OC_PAR * IC_PAR, 3*3*IC_PAR*OC_PAR, "golden_weights.hex");
+  // dump_to_hex_file(packed_arr, IC_PAR * PP_PAR, 8 * PP_PAR * IC_PAR, "golden_features.hex");
  
   // --- Set Kernel Arguments ---
   std::cout << "INFO: Setting kernel arguments..." << std::endl;
-  OCL_CHECK(err, err = vlaAccelKernel.setArg(0, device_input_buffer));
-  OCL_CHECK(err, err = vlaAccelKernel.setArg(1, device_weight_buffer));
-  OCL_CHECK(err, err = vlaAccelKernel.setArg(2, device_output_buffer));
+  OCL_CHECK(err, err = vlaAccelKernel.setArg(0, dev_heap));
+  OCL_CHECK(err, err = vlaAccelKernel.setArg(1, dev_buf_weights));
+  OCL_CHECK(err, err = vlaAccelKernel.setArg(2, dev_buf_a));
+  OCL_CHECK(err, err = vlaAccelKernel.setArg(3, dev_buf_b));
   // --- Execute Kernels ---
   // Enqueue tasks. Streams handle synchronization.
   // Using Out-of-Order queue allows runtime to potentially overlap execution.
@@ -331,99 +448,6 @@ int main(int argc, char **argv) {
   OCL_CHECK(err, err = q.finish());
   std::cout << "INFO: Kernels finished execution." << std::endl;
 
-  std::cout << "INFO: Host execution finished successfully." << std::endl;
-
-  /*
-  // =========================================================================
-  // GROUND TRUTH GENERATION (Full First Tile: Rows 0-3, IC 0-15)
-  // =========================================================================
-  std::cout << "\n--- Generating Ground Truth for Tile 0 (Rows 0-" << TILE_HEIGHT-1 
-            << ", IC 0-" << IC_PAR-1 << ") ---" << std::endl;
-
-  // Configuration
-  int check_oc_start = 16;      // First OC Tile starts at 0
-  int strips_per_row = FM_WIDTH / PP_PAR;
-  int total_strips   = TILE_HEIGHT * strips_per_row;
-  int quant_shift = 10;
-
-  // Iterate through the strips in the order hardware produces them (Row-Major)
-  for (int strip_idx = 0; strip_idx < total_strips; ++strip_idx) {
-      
-      // Map linear strip index to 2D coordinates
-      int row_idx = strip_idx / strips_per_row;
-      int col_strip_idx = strip_idx % strips_per_row;
-      int col_start = col_strip_idx * PP_PAR;
-
-      // Storage for this strip's results: [PP_PAR][OC_PAR]
-      int32_t strip_results[PP_PAR][OC_PAR]; 
-
-      // 1. Loop over Pixels in this Strip
-      for (int p = 0; p < PP_PAR; ++p) {
-          int out_x = col_start + p;
-          int out_y = row_idx; // Relative to Tile 0 (Global Row 0..3)
-
-          // 2. Loop over Output Channels
-          for (int local_oc = 0; local_oc < OC_PAR; ++local_oc) {
-              int global_oc = check_oc_start + local_oc;
-              int32_t accumulator = 0;
-
-              // 3. Convolution (3x3)
-              for (int ky = 0; ky < 3; ++ky) {
-                  for (int kx = 0; kx < 3; ++kx) {
-                      
-                      // Calculate Input Coordinates (Handle Padding)
-                      // Note: out_y is relative to the tile. 
-                      // Since this is Tile 0, out_y=0 is the top of the image.
-                      int in_y = out_y + ky - 1; 
-                      int in_x = out_x + kx - 1;
-
-                      bool is_padding = (in_y < 0) || (in_y >= FM_HEIGHT) || 
-                                        (in_x < 0) || (in_x >= FM_WIDTH);
-
-                      // 4. Loop over Input Channels (Partial Sum: 0 to IC_PAR-1)
-                      for (int global_ic = 0; global_ic < FM_CHANNELS; ++global_ic) {
-                          int16_t pixel_val = 0;
-                          if (!is_padding) {
-                              // Planar Layout Indexing [C][H][W]
-                              int in_idx = (global_ic * FM_HEIGHT * FM_WIDTH) + 
-                                           (in_y * FM_WIDTH) + in_x;
-                              // CRITICAL: Cast to signed 8-bit first
-                              pixel_val = (int16_t)(int8_t)arr[in_idx];
-                          }
-
-                          // Weight Layout Indexing [OC][IC][3][3]
-                          int w_idx = (global_oc * (FM_CHANNELS * 9)) + 
-                                      (global_ic * 9) + 
-                                      (ky * 3 + kx);
-                          // CRITICAL: Cast to signed 8-bit first
-                          int16_t weight_val = (int16_t)(int8_t)weight_arr[w_idx];
-
-                          accumulator += (pixel_val * weight_val);
-                      }
-                  }
-              }
-	      int32_t quantized_val = accumulator >> quant_shift;
-	      if (quantized_val > 127) quantized_val = 127;
-	      else if (quantized_val < -128) quantized_val = -128;
-              strip_results[p][local_oc] = quantized_val; // accumulator;
-          }
-      }
-
-      // --- PRINT HEX STRING FOR THIS STRIP ---
-      // This matches one line in the hardware dump file
-      std::cout << "Strip " << strip_idx << " (Row " << row_idx << ", Col " << col_start << "): 0x";
-      
-      // Iterate backwards (MSB -> LSB)
-      // Hardware packing: P=0,OC=0 is LSB. P=3,OC=15 is MSB.
-      for (int p = PP_PAR - 1; p >= 0; --p) {
-          for (int o = OC_PAR - 1; o >= 0; --o) {
-              uint32_t val = strip_results[p][o] & 0x000000FF; // Mask to 28 bits 0x0FFFFFFF
-              std::cout << std::hex << std::setw(2) << std::setfill('0') << val;   //setw(7)
-          }
-      }
-      std::cout << std::dec << std::endl;
-  }
-  */
   std::cout << "INFO: Reading output data from device..." << std::endl;
   
   // Calculate total output size
@@ -436,18 +460,20 @@ int main(int argc, char **argv) {
 
   // Enqueue Read Command
   OCL_CHECK(err, err = q.enqueueReadBuffer(
-      device_output_buffer, // Buffer object
+      dev_buf_a,            // Buffer object
       CL_TRUE,              // Blocking read
-      0,                    // Offset
+      0, // INSTR_SECTION_SIZE,   // Offset
       output_size_bytes,    // Size
       host_output_buffer.data(),
-      nullptr, nullptr));
+      nullptr, nullptr)
+  );
 
   // =========================================================================
   // 6. VERIFY AGAINST GROUND TRUTH
   // =========================================================================
   std::cout << "INFO: Verifying results..." << std::endl;
-  
+
+  /*
   int errors = 0;
   int max_errors_to_print = 20;
   int linear_idx = 0; // Tracks position in the raw HBM buffer
@@ -498,7 +524,7 @@ int main(int argc, char **argv) {
                                           // Input is Planar [C][H][W] (Matches your pack function)
                                           int in_idx = (ic * FM_HEIGHT * FM_WIDTH) + 
                                                        (in_y * FM_WIDTH) + in_x;
-                                          pixel_val = (int16_t)(int8_t)arr[in_idx];
+                                          pixel_val = (int16_t)(int8_t)raw_input[in_idx];
                                       }
 
                                       // Weights are [OC][IC][3][3] (Matches your pack function)
@@ -541,5 +567,91 @@ int main(int argc, char **argv) {
           }
       }
   }
+*/
+
+    // True verification starts here:
+    // 1. Prepare Data Containers
+    // Convert raw_input (uint8) to signed int8 for calculation
+    std::vector<int8_t> input_L1(raw_input.begin(), raw_input.end());
+    
+    // Split weights for Layer 1 and Layer 2
+    // Assuming both layers have same dims: 32x32x3x3
+    size_t layer_weight_size = OUT_CHANNELS * FM_CHANNELS * 9;
+    
+    std::vector<int8_t> weights_L1(layer_weight_size);
+    std::vector<int8_t> weights_L2(layer_weight_size);
+    
+    // Copy from your main raw_weights buffer
+    // (Assuming you packed L1 then L2 sequentially in raw_weights)
+    for(size_t i=0; i<layer_weight_size; ++i) {
+        weights_L1[i] = (int8_t)weight_arr[i];
+        weights_L2[i] = (int8_t)weight_arr[i];
+    }
+
+    // 2. Compute Golden Output Sequentially
+    std::cout << "INFO: Computing Golden Model for Layer 1..." << std::endl;
+    std::vector<int8_t> golden_L1 = compute_gold_conv_layer(
+        input_L1, weights_L1, 
+        FM_HEIGHT, FM_WIDTH, FM_CHANNELS, OUT_CHANNELS, 
+        10 // quant_shift
+    );
+
+    std::cout << "INFO: Computing Golden Model for Layer 2..." << std::endl;
+    std::vector<int8_t> golden_L2 = compute_gold_conv_layer(
+        golden_L1, weights_L2, // Input is Output of L1
+        FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
+        10 // quant_shift
+    );
+
+    std::vector<int8_t> golden_L3 = compute_gold_conv_layer(
+	golden_L2, weights_L2, // Input is Output of L2
+	FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
+	10 // quant_shift
+    );
+
+    // 3. Verify Final Result
+    // The hardware output is Tiled. The golden_L3 is Planar.
+    // We iterate in Hardware Order and look up the Planar index.
+    
+    std::cout << "INFO: Verifying Layer 3 Results..." << std::endl;
+    int errors = 0;
+    int linear_idx = 0;
+
+    for (int ht = 0; ht < FM_HEIGHT / TILE_HEIGHT; ++ht) {
+        for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
+            for (int r = 0; r < TILE_HEIGHT; ++r) {
+                for (int w_strip = 0; w_strip < FM_WIDTH / PP_PAR; ++w_strip) {
+                    for (int p = 0; p < PP_PAR; ++p) {
+                        for (int o = 0; o < OC_PAR; ++o) {
+                            
+                            // Calculate Global Coordinates
+                            int global_h = (ht * TILE_HEIGHT) + r;
+                            int global_w = (w_strip * PP_PAR) + p;
+                            int global_oc = (ot * OC_PAR) + o;
+
+                            // Look up Golden Value (Planar Indexing)
+                            int gold_idx = (global_oc * FM_HEIGHT * FM_WIDTH) + 
+                                           (global_h * FM_WIDTH) + global_w;
+                            
+                            int8_t expected = golden_L3[gold_idx];
+                            int8_t hw_val = host_output_buffer[linear_idx];
+
+                            if (hw_val != expected) {
+                                if (errors < 10) {
+                                    std::cout << "Error at [H=" << global_h << " W=" << global_w 
+                                              << " OC=" << global_oc << "] "
+                                              << "Exp: " << (int)expected << " Got: " << (int)hw_val 
+                                              << std::endl;
+                                }
+                                errors++;
+                            }
+                            linear_idx++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
   return EXIT_SUCCESS;
 }

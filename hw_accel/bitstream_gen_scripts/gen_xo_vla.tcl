@@ -24,9 +24,10 @@ ipx::associate_bus_interfaces -busif m_axi_wgmem -clock ap_clk [ipx::current_cor
 ipx::associate_bus_interfaces -busif m_axi_fo_gmem -clock ap_clk [ipx::current_core]
 
 # Adding registers
-ipx::add_register feat_input_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
+ipx::add_register heap_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
 ipx::add_register weights_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
-ipx::add_register feat_output_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
+ipx::add_register buff_a_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
+ipx::add_register buff_b_addr [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
 # CTRL register is required for ap_ctrl_hs control protocol, it needs to be at 0x00 and 32 bits
 ipx::add_register CTRL [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]
 
@@ -34,20 +35,26 @@ ipx::add_register CTRL [ipx::get_address_blocks reg0 -of_objects [ipx::get_memor
 set_property address_offset 0x00 [ipx::get_registers CTRL -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 32 [ipx::get_registers CTRL -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 
-set_property address_offset 0x14 [ipx::get_registers feat_input_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-set_property size 64 [ipx::get_registers feat_input_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers feat_input_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-set_property value m_axi_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers feat_input_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
+set_property address_offset 0x14 [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property size 64 [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property value m_axi_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
-set_property address_offset 0x1c [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property address_offset 0x1c [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property size 64 [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property value m_axi_fo_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
+
+set_property address_offset 0x24 [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property size 64 [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property value m_axi_fo_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
+
+set_property address_offset 0x2c [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 64 [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property value m_axi_wgmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
-set_property address_offset 0x24 [ipx::get_registers feat_output_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-set_property size 64 [ipx::get_registers feat_output_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers feat_output_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
-set_property value m_axi_fo_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers feat_output_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
 ipx::add_bus_parameter FREQ_TOLERANCE_HZ [ipx::get_bus_interfaces ap_clk -of_objects [ipx::current_core]]
 set_property value -1 [ipx::get_bus_parameters FREQ_TOLERANCE_HZ -of_objects [ipx::get_bus_interfaces ap_clk -of_objects [ipx::current_core]]]

@@ -1,18 +1,13 @@
 `default_nettype none
 
 module vla_accel_top #(
-    parameter IMG_W = 128,
-    parameter IMG_H = 128,
-    parameter IMG_C = 64,
-    parameter OC    = 64,
-
     parameter IC_PAR = 16,
     parameter OC_PAR = 16,
     parameter PP_PAR = 8,
     parameter DATA_WIDTH = 8,
 
     parameter MAX_IMG_WIDTH = 128,
-    parameter TILE_HEIGHT = 8,
+    parameter TILE_HEIGHT = 4,
     
     parameter C_M_AXI_GMEM_ADDR_WIDTH = 64,
     parameter C_M_AXI_GMEM_DATA_WIDTH = 512,
@@ -41,7 +36,8 @@ module vla_accel_top #(
     output wire                                         s_axi_control_rvalid,
     input  wire                                         s_axi_control_rready,
 
-    // AXI Master Interface for Global Memory Reads for Feature Map
+    // AXI Master Interface for Global Memory Reads for Feature Map (and
+    // Instructions)
     output wire       					m_axi_gmem_arvalid,
     input  wire                                         m_axi_gmem_arready,
     output wire  [C_M_AXI_GMEM_ADDR_WIDTH-1:0]          m_axi_gmem_araddr,
@@ -98,15 +94,50 @@ module vla_accel_top #(
 	end
     end
 
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_feat_input_addr_base;
+    wire        sched_arvalid;
+    wire [63:0] sched_araddr;  // Offset from Scheduler
+    wire [7:0]  sched_arlen;
+    wire [2:0]  sched_arsize;
+    wire [1:0]  sched_arburst;
+    wire        sched_rready;
+
+    // --- Internal AXI Signals for Feature Map Reader ---
+    // (Ensure your burst_axi_read_master connects to these, not top-level directly)
+    wire        feat_arvalid;
+    wire [63:0] feat_araddr;   // Physical address from Tile Manager logic
+    wire [7:0]  feat_arlen;
+    wire [2:0]  feat_arsize;
+    wire [1:0]  feat_arburst;
+    wire        feat_rready;
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] heap_base_addr;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_input_addr_w;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = hbm_feat_input_addr_base + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_reg_a_addr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_reg_b_addr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_foutput_addr;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_weight_input_addr_base;
+    wire [1:0] cfg_input_bank, cfg_output_bank;
+
+    wire [63:0] cfg_input_offset;
+    wire [63:0] cfg_output_offset;
+    wire [63:0] cfg_weight_offset;
+
+    wire [63:0] base_hbm0 = heap_base_addr;
+    wire [63:0] base_hbm1 = hbm_reg_a_addr;
+    wire [63:0] base_hbm2 = hbm_reg_b_addr;
+    wire [63:0] base_hbm3 = hbm_weight_input_addr_base;
+
+    wire [63:0] current_input_base  = (cfg_input_bank  == 2'b00) ? base_hbm0 :
+	    			      (cfg_input_bank  == 2'b01) ? base_hbm1 :
+				      (cfg_input_bank  == 2'b10) ? base_hbm2 : base_hbm0;
+    wire [63:0] current_output_base = (cfg_output_bank == 2'b00) ? base_hbm0 : 
+	    			      (cfg_output_bank == 2'b01) ? base_hbm1 :
+				      (cfg_output_bank == 2'b10) ? base_hbm2 : base_hbm0;
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = current_input_base + cfg_input_offset + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + (hbm_winput_addr << 6);
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_output_addr_base;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_foutput_addr;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = hbm_output_addr_base + (hbm_foutput_addr << 6);
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = current_output_base + cfg_output_offset + (hbm_foutput_addr << 6);
 
     vla_accel_control_s_axi #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),
@@ -132,9 +163,10 @@ module vla_accel_top #(
 	.RRESP(s_axi_control_rresp),
 	.RVALID(s_axi_control_rvalid),
 	.RREADY(s_axi_control_rready),
-	.reg_feat_input_addr(hbm_feat_input_addr_base),
+	.reg_heap_addr(heap_base_addr),
+	.reg_buff_a_addr(hbm_reg_a_addr),
+	.reg_buff_b_addr(hbm_reg_b_addr),
 	.reg_weight_input_addr(hbm_weight_input_addr_base),
-	.reg_feat_output_addr(hbm_output_addr_base),
         .user_start(start_process_internal), // Controller generates start pulse
         .user_done(process_done_internal),     // Core logic signals completion
 	.user_idle(ap_idle),
@@ -155,16 +187,18 @@ module vla_accel_top #(
         .rst_n(ap_rst_n),
         .start(hbm_read_start),
 	.base_address(hbm_read_addr),
-        .m_axi_arvalid(m_axi_gmem_arvalid),
+
+        .m_axi_arvalid(feat_arvalid),
         .m_axi_arready(m_axi_gmem_arready),
-        .m_axi_araddr(m_axi_gmem_araddr),
-        .m_axi_arlen(m_axi_gmem_arlen),
-        .m_axi_arsize(m_axi_gmem_arsize),
-	.m_axi_arburst(m_axi_gmem_arburst),
+        .m_axi_araddr(feat_araddr),
+        .m_axi_arlen(feat_arlen),
+        .m_axi_arsize(feat_arsize),
+	.m_axi_arburst(feat_arburst),
         .m_axi_rvalid(m_axi_gmem_rvalid),
-        .m_axi_rready(m_axi_gmem_rready),
+        .m_axi_rready(feat_rready),
         .m_axi_rdata(m_axi_gmem_rdata),
         .m_axi_rlast(m_axi_gmem_rlast),
+
 	.total_words_to_read(feature_map_words),
         .data_valid(read_master_data_valid),
         .data_out(read_master_data_out),
@@ -236,6 +270,55 @@ module vla_accel_top #(
 	.done(hbm_fwrite_done)
     );
 
+    wire tm_start, tm_done;
+    wire [15:0] img_width, img_height, img_channels;
+    wire [15:0] out_channels;
+    wire [4:0] quant_shift;
+    wire is_conv;
+    wire [63:0] sched_fetch_addr = heap_base_addr + sched_araddr;
+
+    assign m_axi_gmem_arvalid = sched_arvalid | feat_arvalid;
+    assign m_axi_gmem_araddr = sched_arvalid ? sched_fetch_addr : hbm_read_addr;
+    assign m_axi_gmem_arlen   = sched_arvalid ? sched_arlen  : feat_arlen;
+    assign m_axi_gmem_arsize  = sched_arvalid ? sched_arsize : feat_arsize;
+    assign m_axi_gmem_arburst = sched_arvalid ? sched_arburst : feat_arburst;
+    assign m_axi_gmem_rready  = sched_rready | feat_rready;
+
+    instruction_scheduler #(
+	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
+	.DATA_WIDTH(C_M_AXI_GMEM_DATA_WIDTH)
+    ) instr_scheduler_inst (
+	.clk(ap_clk),
+	.rst_n(ap_rst_n),
+	.start(start_process_internal),
+	.base_addr(64'd0),
+	.done(process_done_internal),
+
+	.m_axi_arvalid(sched_arvalid),
+	.m_axi_arready(m_axi_gmem_arready),
+	.m_axi_araddr(sched_araddr),
+	.m_axi_arlen(sched_arlen),
+	.m_axi_arsize(sched_arsize),
+	.m_axi_arburst(sched_arburst),
+	.m_axi_rvalid(m_axi_gmem_rvalid),
+	.m_axi_rready(sched_rready),
+	.m_axi_rdata(m_axi_gmem_rdata),
+
+	.tm_start(tm_start),
+	.tm_done(tm_done),
+	.cfg_input_addr(cfg_input_offset),
+	.cfg_output_addr(cfg_output_offset),
+	.cfg_weight_addr(cfg_weight_offset),
+	.cfg_img_width(img_width),
+	.cfg_img_height(img_height),
+	.cfg_in_channels(img_channels),
+	.cfg_out_channels(out_channels),
+	.cfg_quant_shift(quant_shift),
+	.cfg_is_conv(is_conv),
+	.cfg_input_bank(cfg_input_bank),
+	.cfg_output_bank(cfg_output_bank)
+    );
+
     tile_manager #(
 	.IC_PAR(IC_PAR),
 	.OC_PAR(OC_PAR),
@@ -247,12 +330,12 @@ module vla_accel_top #(
     ) tile_manager_inst (
 	.clk(ap_clk),
 	.rst_n(ap_rst_n),
-	.start(start_process_internal),
+	.start(tm_start),
 
-	.full_img_width_strips(IMG_W / PP_PAR),
-	.full_img_height(IMG_H),
-	.full_img_channels(IMG_C),
-	.output_channels(OC),
+	.full_img_width_strips(img_width / PP_PAR),
+	.full_img_height(img_height),
+	.full_img_channels(img_channels),
+	.output_channels(out_channels),
 	.feature_map_words(feature_map_words),
 	.weight_words(weight_words),
 	.fmap_out_words(output_feature_map_words),
@@ -273,7 +356,7 @@ module vla_accel_top #(
 	.hbm_fmap_wvalid(write_master_fmap_data_valid),
 	.hbm_fmap_out_ready(write_master_fmap_data_ready),
 	.hbm_fmap_out_done(hbm_fwrite_done),
-	.done(process_done_internal)
+	.done(tm_done)
     );
 
 endmodule
