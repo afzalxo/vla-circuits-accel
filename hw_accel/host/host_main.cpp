@@ -17,13 +17,14 @@
 
 #include "ap_int.h"
 
-constexpr uint16_t NUM_LAYERS = 3;
+constexpr uint16_t NUM_LAYERS = 2;
+constexpr uint16_t STRIDE = 2;
 
 constexpr uint16_t FM_WIDTH = 64;    // Feature map width
 constexpr uint16_t FM_HEIGHT = 64;   // Feature map height
  
-constexpr uint16_t FM_CHANNELS = 64;
-constexpr uint16_t OUT_CHANNELS = 64;
+constexpr uint16_t FM_CHANNELS = 32;
+constexpr uint16_t OUT_CHANNELS = 32;
 
 constexpr uint16_t IC_PAR = 16;
 constexpr uint16_t OC_PAR = 16;
@@ -84,7 +85,9 @@ struct alignas(64) NISA_Instruction {
     uint8_t  quant_shift;    // [271:264]
     uint8_t  bank_sel;       // [279:272] select HBM input/output bank for this layer
     uint8_t  relu_en;        // [287:280] ReLU enable flag
-    uint8_t  padding[28];    // Pad to 64 bytes total
+    uint8_t  stride;         // [295:288] stride (1 or 2)
+    uint8_t  log2_mem_tile_height; // [303:296]
+    uint8_t  padding[26];    // Pad to 64 bytes total
 };
 
 /**
@@ -250,23 +253,29 @@ std::vector<int8_t> compute_gold_conv_layer(
     const std::vector<int8_t>& weights,
     int H, int W, int IC, int OC,
     int quant_shift,
-    int relu_en
+    int relu_en,
+    int stride
 ) {
-    std::vector<int8_t> output(OC * H * W);
 
+    int H_out = H / stride;
+    int W_out = W / stride;
+
+    std::vector<int8_t> output(OC * H_out * W_out);
     // Loop over Output Channels
     for (int oc = 0; oc < OC; ++oc) {
         // Loop over Spatial Dimensions
-        for (int y = 0; y < H; ++y) {
-            for (int x = 0; x < W; ++x) {
+        for (int y = 0; y < H_out; ++y) {
+            for (int x = 0; x < W_out; ++x) {
                 
+		int y_in_center = y * stride;
+                int x_in_center = x * stride;
                 int32_t accumulator = 0;
 
                 // Convolution (3x3)
                 for (int ky = 0; ky < 3; ++ky) {
                     for (int kx = 0; kx < 3; ++kx) {
-                        int in_y = y + ky - 1; // Padding handling (3x3 specific)
-                        int in_x = x + kx - 1;
+                        int in_y = y_in_center + ky - 1; // Padding handling (3x3 specific)
+                        int in_x = x_in_center + kx - 1;
 
                         bool is_pad = (in_y < 0 || in_y >= H || in_x < 0 || in_x >= W);
 
@@ -298,7 +307,7 @@ std::vector<int8_t> compute_gold_conv_layer(
                 else result = (int8_t)shifted;
 
                 // Output Index: [OC][H][W]
-                int out_idx = (oc * H * W) + (y * W) + x;
+                int out_idx = (oc * H_out * W_out) + (y * W_out) + x;
                 output[out_idx] = result;
             }
         }
@@ -381,7 +390,7 @@ int main(int argc, char **argv) {
 
   std::vector<uint8_t, aligned_allocator<uint8_t>> host_weight_buffer(packed_weight_arr, packed_weight_arr + sizeof(packed_weight_arr) / sizeof(packed_weight_arr[0]));
 
-  NISA_Instruction instr_list[4];
+  NISA_Instruction instr_list[3];
   // Instruction 0: Conv Layer 0
   instr_list[0].input_offset  = INSTR_SECTION_SIZE; // Data starts after 64KB
   instr_list[0].output_offset = 0;                  // Output starts at 0 of HBM[2]
@@ -393,19 +402,24 @@ int main(int argc, char **argv) {
   instr_list[0].opcode        = OP_CONV;
   instr_list[0].bank_sel      = 0x04;  // 0b0100: HBM1 output, HBM0 input
   instr_list[0].relu_en       = 1;
+  instr_list[0].stride        = STRIDE;
+  instr_list[0].log2_mem_tile_height = 2; // log2(4) = 2
   instr_list[0].quant_shift   = 10;
   // Instruction 1: Conv Layer 1
   instr_list[1].input_offset  = 0;
   instr_list[1].output_offset = 0;
   instr_list[1].weight_offset = 0;
-  instr_list[1].width         = FM_WIDTH;
-  instr_list[1].height        = FM_HEIGHT;
-  instr_list[1].in_channels   = FM_CHANNELS;
+  instr_list[1].width         = FM_WIDTH / STRIDE;
+  instr_list[1].height        = FM_HEIGHT / STRIDE;
+  instr_list[1].in_channels   = OUT_CHANNELS;
   instr_list[1].out_channels  = OUT_CHANNELS;
   instr_list[1].opcode        = OP_CONV;
   instr_list[1].bank_sel      = 0x09;  // 0b1001: HBM2 output, HBM1 input
   instr_list[1].relu_en       = 1;
+  instr_list[1].stride        = STRIDE;
+  instr_list[1].log2_mem_tile_height = 1; // log2(2) = 1
   instr_list[1].quant_shift   = 10;
+  /*
   // Instruction 2: Conv Layer 2
   instr_list[2].input_offset  = 0;
   instr_list[2].output_offset = 0;
@@ -418,9 +432,10 @@ int main(int argc, char **argv) {
   instr_list[2].bank_sel      = 0x06;  // 0b0110: HBM1 output, HBM2 input
   instr_list[2].relu_en       = 1;
   instr_list[2].quant_shift   = 10;
+  */
 
   // HALT Instruction
-  instr_list[3].opcode        = OP_HALT;
+  instr_list[2].opcode        = OP_HALT;
 
   std::cout << "Size of instr_list: %zu bytes" << sizeof(instr_list) << std::endl;
   memcpy(host_heap.data(), instr_list, sizeof(instr_list));
@@ -463,7 +478,7 @@ int main(int argc, char **argv) {
   // Calculate total output size
   // Note: Hardware writes TILE_HEIGHT rows per tile. 
   // If FM_HEIGHT is a multiple of TILE_HEIGHT, this matches the full image size.
-  size_t output_size_bytes = FM_HEIGHT * FM_WIDTH * OUT_CHANNELS * sizeof(int8_t);
+  size_t output_size_bytes = (FM_HEIGHT / (STRIDE * NUM_LAYERS)) * (FM_WIDTH / (STRIDE * NUM_LAYERS)) * OUT_CHANNELS * sizeof(int8_t);
   
   // Allocate Host Buffer (Aligned for OpenCL)
   std::vector<int8_t, aligned_allocator<int8_t>> host_output_buffer(output_size_bytes);
@@ -493,24 +508,24 @@ int main(int argc, char **argv) {
   // =========================================================================
   std::cout << "INFO: Verifying results..." << std::endl;
 
-    // True verification starts here:
-    // 1. Prepare Data Containers
-    // Convert raw_input (uint8) to signed int8 for calculation
-    std::vector<int8_t> input_L1(raw_input.begin(), raw_input.end());
+  // True verification starts here:
+  // 1. Prepare Data Containers
+  // Convert raw_input (uint8) to signed int8 for calculation
+  std::vector<int8_t> input_L1(raw_input.begin(), raw_input.end());
     
     // Split weights for Layer 1 and Layer 2
     // Assuming both layers have same dims: 32x32x3x3
-    size_t layer_weight_size = OUT_CHANNELS * FM_CHANNELS * 9;
+  size_t layer_weight_size = OUT_CHANNELS * FM_CHANNELS * 9;
     
-    std::vector<int8_t> weights_L1(layer_weight_size);
-    std::vector<int8_t> weights_L2(layer_weight_size);
+  std::vector<int8_t> weights_L1(layer_weight_size);
+  std::vector<int8_t> weights_L2(layer_weight_size);
     
     // Copy from your main raw_weights buffer
     // (Assuming you packed L1 then L2 sequentially in raw_weights)
-    for(size_t i=0; i<layer_weight_size; ++i) {
-        weights_L1[i] = (int8_t)weight_arr[i];
-        weights_L2[i] = (int8_t)weight_arr[i];
-    }
+  for(size_t i=0; i<layer_weight_size; ++i) {
+      weights_L1[i] = (int8_t)weight_arr[i];
+      weights_L2[i] = (int8_t)weight_arr[i];
+  }
 
     // 2. Compute Golden Output Sequentially
     std::cout << "INFO: Computing Golden Model for Layer 1..." << std::endl;
@@ -518,67 +533,175 @@ int main(int argc, char **argv) {
         input_L1, weights_L1, 
         FM_HEIGHT, FM_WIDTH, FM_CHANNELS, OUT_CHANNELS, 
         10, // quant_shift
-	1 // relu_en
+	1, // relu_en
+	STRIDE // stride
     );
 
     std::cout << "INFO: Computing Golden Model for Layer 2..." << std::endl;
+    int l2_in_height = FM_HEIGHT / STRIDE;
+    int l2_in_width  = FM_WIDTH / STRIDE;
     std::vector<int8_t> golden_L2 = compute_gold_conv_layer(
         golden_L1, weights_L2, // Input is Output of L1
-        FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
+        l2_in_height, l2_in_width, OUT_CHANNELS, OUT_CHANNELS, 
         10, // quant_shift
-	1 // relu_en
+	1, // relu_en
+	STRIDE
     );
 
+    /*
     std::vector<int8_t> golden_L3 = compute_gold_conv_layer(
 	golden_L2, weights_L2, // Input is Output of L2
 	FM_HEIGHT, FM_WIDTH, OUT_CHANNELS, OUT_CHANNELS, 
 	10, // quant_shift
 	1
     );
+    */
 
     // 3. Verify Final Result
     // The hardware output is Tiled. The golden_L3 is Planar.
     // We iterate in Hardware Order and look up the Planar index.
+    //
+    //
+    std::cout << "DEBUG: Verifying Layer 1 Output..." << std::endl;
+  
+  // 1. Read the Intermediate Buffer
+  // If NUM_LAYERS=2, Layer 1 output is in the "other" buffer.
+  // If Final is Buf_B, then Intermediate is Buf_A.
+  cl::Buffer* intermediate_buffer = (NUM_LAYERS % 2 != 0) ? &dev_buf_b : &dev_buf_a;
+  
+  size_t l1_size = (FM_WIDTH/2) * (FM_HEIGHT/2) * OUT_CHANNELS;
+  std::vector<int8_t> host_l1_debug(l1_size);
+  
+  q.enqueueReadBuffer(*intermediate_buffer, CL_TRUE, 0, l1_size, host_l1_debug.data());
+
+  // 2. Compare against golden_L1
+  int l1_errors = 0;
+  // Note: golden_L1 is Planar. Hardware output is Tiled.
+  // We need to iterate in Hardware Order for the L1 dimensions (32x32).
+  
+  int l1_width = FM_WIDTH / 2;
+  int l1_height = FM_HEIGHT / 2;
+  int l1_tile_h = TILE_HEIGHT / 2; // Stride 2 output tile height
+  int l1_pp_par = PP_PAR / 2;      // Stride 2 output packing
+  
+  int l1_linear_idx = 0;
+
+  for (int ht = 0; ht < FM_HEIGHT / TILE_HEIGHT; ++ht) { // Input Tiles
+      for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
+          for (int r = 0; r < l1_tile_h; ++r) {
+              for (int w_strip = 0; w_strip < FM_WIDTH / PP_PAR; ++w_strip) {
+                  for (int p = 0; p < l1_pp_par; ++p) {
+                      for (int o = 0; o < OC_PAR; ++o) {
+                          
+                          // Coords in 32x32 image
+                          int h = (ht * l1_tile_h) + r;
+                          int w = (w_strip * l1_pp_par) + p;
+                          int oc = (ot * OC_PAR) + o;
+                          
+                          int gold_idx = (oc * l1_height * l1_width) + (h * l1_width) + w;
+                          int8_t exp = golden_L1[gold_idx];
+                          int8_t got = host_l1_debug[l1_linear_idx++];
+                          
+                          if (got != exp) {
+                              if (l1_errors < 5) 
+                                  std::cout << "L1 Error [H=" << h << " W=" << w << "]: Exp " << (int)exp << " Got " << (int)got << std::endl;
+                              l1_errors++;
+                          }
+                      }
+                  }
+              }
+          }
+      }
+  }
+  
+  if (l1_errors > 0) {
+      std::cout << "STOP: Layer 1 Output is incorrect! Fix this first." << std::endl;
+      return EXIT_FAILURE;
+  }
+  std::cout << "DEBUG: Layer 1 Output is CORRECT." << std::endl;
+
+  // =========================================================================
+  // 6. VERIFY RESULTS (With Stride Support)
+  // =========================================================================
+  std::cout << "INFO: Verifying results..." << std::endl;
+  
+  // Configuration (Must match Instruction)
+  int current_stride = STRIDE;
+    // Dimensions of the Final Output (16x16)
+  int final_out_height = l2_in_height / current_stride;
+  int final_out_width  = l2_in_width / current_stride;
+  
+  // Hardware Processing Parameters for Layer 2
+  // The hardware processes the *Input of Layer 2* (32x32)
+  int hw_input_height = l2_in_height;
+  int hw_input_width  = l2_in_width;
+  
+  // Loop Bounds based on Layer 2 Input
+  int num_height_tiles = hw_input_height / TILE_HEIGHT;
+  int num_width_strips = hw_input_width / PP_PAR;
+  
+  // Output Packing for Layer 2
+  int out_tile_height  = TILE_HEIGHT / current_stride;
+  int effective_pp_par = PP_PAR / current_stride; 
+
+  int errors = 0;
+  int linear_idx = 0; 
+
+  // 1. Height Tiles (Iterate over Layer 2 Input Tiles)
+  for (int ht = 0; ht < num_height_tiles; ++ht) {
+      
+      // 2. Output Channel Tiles
+      for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
+          
+          // 3. Output Rows inside the Tile
+          for (int r = 0; r < out_tile_height; ++r) {
+              
+              // 4. Width Strips (Iterate over Layer 2 Input Strips)
+              for (int w_strip = 0; w_strip < num_width_strips; ++w_strip) {
+                  
+                  // 5. Output Pixels inside the Packed Chunk
+                  for (int p = 0; p < effective_pp_par; ++p) {
+                      
+                      // 6. Output Channels
+                      for (int o = 0; o < OC_PAR; ++o) {
+                          
+                          // --- Calculate Global Output Coordinates ---
+                          // These are coordinates in the 16x16 output image
+                          int global_h_out = (ht * out_tile_height) + r;
+                          int global_w_out = (w_strip * effective_pp_par) + p;
+                          int global_oc    = (ot * OC_PAR) + o;
+
+                          // --- Look up Golden Value ---
+                          int gold_idx = (global_oc * final_out_height * final_out_width) + 
+                                         (global_h_out * final_out_width) + global_w_out;
+                          
+                          int8_t expected = golden_L2[gold_idx];
+                          int8_t hw_val = host_output_buffer[linear_idx];
+                          
+                          if (hw_val != expected) {
+                              if (errors < 20) {
+                                  std::cout << "Error at [H=" << global_h_out << " W=" << global_w_out 
+                                            << " OC=" << global_oc << "] "
+                                            << "Exp: " << (int)expected << " Got: " << (int)hw_val 
+                                            << " (HBM Index " << linear_idx << ")" << std::endl;
+                              }
+                              errors++;
+                          }
+                          
+                          linear_idx++;
+                      }
+                  }
+              }
+          }
+      }
+  }
+
+  if (errors == 0) {
+      std::cout << "\n*** TEST PASSED! Hardware output matches Ground Truth. ***" << std::endl;
+  } else {
+      std::cout << "\n*** TEST FAILED! Total Errors: " << errors << " ***" << std::endl;
+      // return EXIT_FAILURE;
+  }
     
-    std::cout << "INFO: Verifying Layer 3 Results..." << std::endl;
-    int errors = 0;
-    int linear_idx = 0;
-
-    for (int ht = 0; ht < FM_HEIGHT / TILE_HEIGHT; ++ht) {
-        for (int ot = 0; ot < OUT_CHANNELS / OC_PAR; ++ot) {
-            for (int r = 0; r < TILE_HEIGHT; ++r) {
-                for (int w_strip = 0; w_strip < FM_WIDTH / PP_PAR; ++w_strip) {
-                    for (int p = 0; p < PP_PAR; ++p) {
-                        for (int o = 0; o < OC_PAR; ++o) {
-                            
-                            // Calculate Global Coordinates
-                            int global_h = (ht * TILE_HEIGHT) + r;
-                            int global_w = (w_strip * PP_PAR) + p;
-                            int global_oc = (ot * OC_PAR) + o;
-
-                            // Look up Golden Value (Planar Indexing)
-                            int gold_idx = (global_oc * FM_HEIGHT * FM_WIDTH) + 
-                                           (global_h * FM_WIDTH) + global_w;
-                            
-                            int8_t expected = golden_L3[gold_idx];
-                            int8_t hw_val = host_output_buffer[linear_idx];
-
-                            if (hw_val != expected) {
-                                if (errors < 10) {
-                                    std::cout << "Error at [H=" << global_h << " W=" << global_w 
-                                              << " OC=" << global_oc << "] "
-                                              << "Exp: " << (int)expected << " Got: " << (int)hw_val 
-                                              << std::endl;
-                                }
-                                errors++;
-                            }
-                            linear_idx++;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
   return EXIT_SUCCESS;
 }

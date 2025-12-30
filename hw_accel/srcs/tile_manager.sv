@@ -25,6 +25,8 @@ module tile_manager #(
     output wire [15:0] fmap_out_words,
     
     input wire relu_en,
+    input wire [1:0] stride,
+    input wire [2:0] log2_mem_tile_height,
     // Input FMap DMA Interface
     input wire [PP_PAR*IC_PAR*DATA_WIDTH-1:0] hbm_data_in,
     output wire [63:0] hbm_addr,
@@ -126,6 +128,7 @@ module tile_manager #(
 	.feature_map_words(feature_map_words),
         .tile_y_index(current_tile_y),
 	.tile_ic_index(current_tile_ic),
+	.log2_mem_tile_height(log2_mem_tile_height),
         .hbm_data_in(hbm_data_in),
         .hbm_addr(hbm_addr),
         .hbm_ren(hbm_ren),
@@ -172,6 +175,7 @@ module tile_manager #(
 	.tile_y_index(current_tile_y),
 	.tile_oc_index(current_tile_oc),
 	.relu_en(relu_en),
+	.stride(stride),
 	.write_count(fmap_out_words),
 	.uram_addr(dma_uram_fmap_out_addr),
 	.uram_rdata(dma_fmap_out_wdata),
@@ -195,6 +199,7 @@ module tile_manager #(
 	.img_channels(full_img_channels),
         .weights(acc_weights_data),
 	.k_x(k_x), .k_y(k_y),
+	.stride(stride),
 	.weight_req(acc_weights_req),
 	.weight_ack(acc_weights_ack),
         .din_data(acc_din_data),
@@ -243,24 +248,27 @@ module tile_manager #(
 	    acc_out_row_cnt <= 0;
             acc_out_col_cnt <= 0;
         end else if (acc_dout_valid) begin
-	    if (acc_out_row_cnt >= 1 && acc_out_row_cnt <= TILE_HEIGHT) begin
-                if (current_tile_ic == 0) begin
-                    uram_output[out_ptr] <= acc_dout_data;
-                end else begin
-	            for (p = 0; p < PP_PAR; p = p + 1) begin
-                        for (o = 0; o < OC_PAR; o = o + 1) begin
-                            // 1. LHS: Select the specific 28-bit slice in the memory to update.
-                            // 2. RHS: Read the OLD value from that same slice ($signed).
-                            // 3. RHS: Add the NEW value from the accelerator ($signed).
-                            // 4. Use Non-Blocking (<=) to schedule the update.
-                            uram_output[out_ptr][((p * OC_PAR + o) * ACC_WIDTH) +: ACC_WIDTH] <= 
-                                $signed(uram_output[out_ptr][((p * OC_PAR + o) * ACC_WIDTH) +: ACC_WIDTH]) + 
-                                $signed(acc_dout_data[p][o]);
-                        end
-                    end
-                end
+	    // if (acc_out_row_cnt >= 1 && acc_out_row_cnt <= TILE_HEIGHT) begin
+	        for (p = 0; p < PP_PAR; p = p + 1) begin
+	            if (p % stride == 0) begin
+	                integer p_out = p / stride;
+	                for (o = 0; o < OC_PAR; o = o + 1) begin
+	            	integer dst_bit = (p_out * OC_PAR + o) * ACC_WIDTH;
+	            	if (current_tile_ic == 0) begin
+	            	    // First Pass: Overwrite
+	            	    uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= acc_dout_data[p][o];
+	            	end else begin
+	            	    // Accumulation Pass: Read-Modify-Write
+	            	    // Note: We read from the PACKED location (dst_bit)
+	            	    uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= 
+	            		$signed(uram_output[out_ptr][dst_bit +: ACC_WIDTH]) + 
+	            		$signed(acc_dout_data[p][o]);
+	            	end
+	                end
+	            end
+	        end
                 out_ptr <= out_ptr + 1;
-	    end
+	    // end
 
 	    if (acc_out_col_cnt == full_img_width_strips - 1) begin
                 acc_out_col_cnt <= 0;

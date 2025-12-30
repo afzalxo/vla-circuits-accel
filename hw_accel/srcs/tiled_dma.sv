@@ -21,6 +21,7 @@ module tiled_dma #(
     input wire [15:0] img_channels,   // Number of Channels
     input wire [15:0] tile_y_index,   // Current vertical tile index
     input wire [15:0] tile_ic_index,  // Current IC tile index
+    input wire [2:0] log2_mem_tile_height, // (0=1, 1=2, 2=4)
 
     output wire [15:0] feature_map_words,
     
@@ -44,7 +45,7 @@ module tiled_dma #(
     wire [31:0] stride_row_words = img_width / VECTORS_PER_HBM_WORD;  // 8 / 4 = 2
     
     // Size of one IC Tile Block (contains TILE_HEIGHT rows)
-    wire [31:0] stride_ic_tile_words = stride_row_words * TILE_HEIGHT;
+    wire [31:0] stride_ic_tile_words = stride_row_words << log2_mem_tile_height;
     
     // Size of one Height Tile Block (contains all IC tiles for this height)
     // This is the jump required to go from Height Tile N to Height Tile N+1
@@ -65,8 +66,11 @@ module tiled_dma #(
     // -------------------------------------
     // Determine which physical Height Tile block this row belongs to.
     // This handles the Halo case where we read a row from the Next/Prev tile.
-    wire [15:0] target_height_tile = curr_row / TILE_HEIGHT;
-    wire [15:0] row_in_tile        = curr_row % TILE_HEIGHT;
+    // wire [15:0] target_height_tile = curr_row / TILE_HEIGHT;
+    // wire [15:0] row_in_tile        = curr_row % TILE_HEIGHT;
+    wire [15:0] target_height_tile = curr_row >>> log2_mem_tile_height;
+    wire [15:0] row_mask = (16'd1 << log2_mem_tile_height) - 1;
+    wire [15:0] row_in_tile = curr_row & row_mask;
     
     // Final Base Address for the current row
     wire [63:0] curr_row_base_addr = (target_height_tile * stride_height_tile_words) + 

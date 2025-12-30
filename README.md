@@ -51,3 +51,8 @@ Convolution of full 128x128x64 feature map with 3x3x64x64 kernel implemented and
 ## 26 Dec (HW Accel)
 
 Added multi-layer support and a basic ISA that allows `CONV` and `HALT` instructions for host-configured multi-layer support. The host writes the instruction packet to the HBM[0] heap space (first 64KB). The accelerator reads the instructions, executes each layer sequentially until it encounters `HALT`. Tested and verified using 1-3 conv layers.
+
+
+## 30 Dec (HW Accel)
+
+Added strided convolutions.

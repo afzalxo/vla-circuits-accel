@@ -24,6 +24,7 @@ module conv_controller #(
     output reg seq_load,
     output reg [1:0] k_x,
     output reg [1:0] k_y,
+    input wire [1:0] stride,
     output reg cu_en,
     output reg cu_clear,
     
@@ -37,22 +38,25 @@ module conv_controller #(
     localparam S_IDLE        = 0;
     localparam S_PRIME_ROW   = 1; // Load Row 0
     localparam S_PRIME_SEQ_1 = 2; // Load Row 1, Strip 0
-    localparam SEQ_LOAD_0   = 8; // Intermediate state to pulse seq_load
+    localparam SEQ_LOAD_0    = 8; // Intermediate state to pulse seq_load
     localparam S_PRIME_SEQ_2 = 3; // Load Row 1, Strip 1
-    localparam SEQ_LOAD_1   = 9; // Intermediate state to pulse seq_load
+    localparam SEQ_LOAD_1    = 9; // Intermediate state to pulse seq_load
     localparam S_COMPUTE     = 4;
     localparam S_WAIT        = 5;
     localparam S_FETCH_NEXT  = 6; // Load Next Strip
     localparam S_FLUSH       = 10; // Flush Remaining Data
     localparam S_DONE        = 7;
     localparam S_SWITCH_IC   = 11;
+    localparam S_SKIP_COMPUTE = 12;
+
+    wire is_valid_range = (row_idx < img_height - 2);
+    wire is_stride_match = ((row_idx) % stride == 0);
 
     reg [3:0] state;
     reg [3:0] kernel_step;
     reg [15:0] load_col_cnt;
     reg [15:0] load_row_cnt;
     reg [3:0] pipe_flush_cnt;
-    reg [15:0] ic_tile_cnt;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -70,7 +74,6 @@ module conv_controller #(
             load_row_cnt <= 0;
             kernel_step <= 0;
             pipe_flush_cnt <= 0;
-	    ic_tile_cnt <= 0;
 	    weight_req <= 0;
 	    uram_replay <= 0;
 
@@ -79,7 +82,6 @@ module conv_controller #(
             lb_shift_en <= 0;
             seq_load <= 0;
             dout_valid <= 0;
-	    // din_ready <= 0;
             
             case (state)
                 S_IDLE: begin
@@ -93,20 +95,23 @@ module conv_controller #(
                     end
                 end
 
-                // --- 1. PRIME VERTICAL (Row 0) ---
+                // --- 1. PRIME VERTICAL (Row -1, 0) ---
                 // Only shift Line Buffer. Do NOT pulse Sequencer.
                 S_PRIME_ROW: begin
                     din_ready <= 1;
 		    lb_shift_en <= 1;
                     if (din_valid && din_ready) begin
-                        // lb_shift_en <= 1;
-                        din_ready <= 0; // Stop to ensure clean steps
+                        din_ready <= 0;
 			lb_shift_en <= 0;
                         
                         if (load_col_cnt == img_width_strips - 1) begin
                             load_col_cnt <= 0;
-                            load_row_cnt <= 1;
-                            state <= S_PRIME_SEQ_1;
+			    if (load_row_cnt == 1) begin
+                                load_row_cnt <= 2; 
+                                state <= S_PRIME_SEQ_1;
+                            end else begin
+                                load_row_cnt <= load_row_cnt + 1;
+                            end
                         end else begin
                             load_col_cnt <= load_col_cnt + 1;
                         end
@@ -119,8 +124,6 @@ module conv_controller #(
                     din_ready <= 1;
 		    lb_shift_en <= 1;
                     if (din_valid && din_ready) begin
-                        // lb_shift_en <= 1;
-                        // seq_load <= 1;  // Pulse Sequencer
                         din_ready <= 0;
 			lb_shift_en <= 0;
                         
@@ -148,8 +151,6 @@ module conv_controller #(
                     din_ready <= 1;
 		    lb_shift_en <= 1;
                     if (din_valid && din_ready) begin
-                        // lb_shift_en <= 1;
-                        // seq_load <= 1;  // Pulse Sequencer
                         din_ready <= 0;
 			lb_shift_en <= 0;
                         
@@ -160,10 +161,9 @@ module conv_controller #(
                             load_col_cnt <= load_col_cnt + 1;
                         end
 
-                        // Now we have 2 strips loaded. Ready to compute Window 0.
                         cu_clear <= 1;
                         kernel_step <= 0;
-                        state <=  SEQ_LOAD_1; //S_COMPUTE;
+                        state <=  SEQ_LOAD_1;
                     end
                 end
 
@@ -196,15 +196,7 @@ module conv_controller #(
                 // --- 5. WAIT & UPDATE ---
                 S_WAIT: begin
                     if (pipe_flush_cnt == 5) begin
-			// if (ic_tile_cnt < num_ic_tiles - 1) begin
-			//    dout_valid <= 0; 
-			//    ic_tile_cnt <= ic_tile_cnt + 1;
-			//    weight_req <= 1;
-			//    uram_replay <= 1;
-			//    state <= S_SWITCH_IC;
-			// end else begin
                             dout_valid <= 1;
-			    ic_tile_cnt <= 0;
                             // Update Output Coordinate
                             if (col_idx == img_width_strips - 1) begin
                                 col_idx <= 0;
@@ -239,7 +231,6 @@ module conv_controller #(
                         din_ready <= 1;
 			lb_shift_en <= 1;
                         if (din_valid && din_ready) begin
-                            // lb_shift_en <= 1;
                             seq_load <= 1;
                             din_ready <= 0;
 			    lb_shift_en <= 0;
@@ -250,13 +241,41 @@ module conv_controller #(
                             end else begin
                                 load_col_cnt <= load_col_cnt + 1;
                             end
-                            
-                            cu_clear <= 1;
-                            kernel_step <= 0;
-                            state <= S_COMPUTE;
+                            if (row_idx < img_height - 2 && row_idx % stride == 0) begin  // Only compute for valid data
+				cu_clear <= 1;
+			        kernel_step <= 0;
+				state <= S_COMPUTE;
+		 	    end else begin	
+                                // cu_clear <= 1;
+                                // kernel_step <= 0;
+                                // state <= S_COMPUTE;
+			        state <= S_SKIP_COMPUTE;
+		            end
                         end
                     end
                 end
+
+		S_SKIP_COMPUTE: begin
+                    // Mimics S_WAIT but without waiting for pipeline flush
+                    // because we didn't put anything in the pipeline!
+                    // Update Output Coordinate
+                    if (col_idx == img_width_strips - 1) begin
+                        col_idx <= 0;
+                        row_idx <= row_idx + 1;
+                    end else begin
+                        col_idx <= col_idx + 1;
+                    end
+                    
+                    // Check for completion
+                    if (row_idx == img_height - 1 && col_idx == img_width_strips - 1) begin
+                        state <= S_DONE;
+                    end else if (load_row_cnt >= img_height) begin
+                        state <= S_FLUSH;
+                    end else begin
+                        state <= S_FETCH_NEXT;
+                    end
+                end
+
 
 		S_FLUSH: begin
 		    lb_shift_en <= 1;
@@ -270,9 +289,16 @@ module conv_controller #(
 		        end else begin
 		    	    load_col_cnt <= load_col_cnt + 1;
 		        end
-		        cu_clear <= 1;
-		        kernel_step <= 0;
-		        state <= S_COMPUTE;
+		        // cu_clear <= 1;
+		        // kernel_step <= 0;
+		        // state <= S_COMPUTE;
+			if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+                            cu_clear <= 1;
+                            kernel_step <= 0;
+                            state <= S_COMPUTE;
+                        end else begin
+                            state <= S_SKIP_COMPUTE;
+                        end
 		    end
 		end
 

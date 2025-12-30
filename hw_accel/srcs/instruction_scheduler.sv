@@ -40,6 +40,8 @@ module instruction_scheduler #(
     output reg [4:0]  cfg_quant_shift,
     output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
     output reg 	      cfg_relu_en,
+    output reg [1:0]  cfg_stride,
+    output reg [2:0]  cfg_log2_mem_tile_height,
     output reg [1:0]  cfg_input_bank,
     output reg [1:0]  cfg_output_bank
 );
@@ -92,6 +94,9 @@ module instruction_scheduler #(
             cfg_quant_shift <= 0;
             cfg_is_conv <= 0;
 	    cfg_relu_en <= 0;
+	    cfg_input_bank <= 0;
+	    cfg_output_bank <= 0;
+	    cfg_stride <= 2'b01;
         end else begin
             // Default Pulses
             tm_start <= 0;
@@ -171,6 +176,8 @@ module instruction_scheduler #(
 		    cfg_input_bank  <= instr_reg[273:272];
 		    cfg_output_bank <= instr_reg[275:274];
 		    cfg_relu_en     <= instr_reg[280];
+		    cfg_stride      <= instr_reg[289:288];
+		    cfg_log2_mem_tile_height <= instr_reg[298:296];
                 end
 
                 // 4. Execute Layer

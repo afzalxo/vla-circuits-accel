@@ -23,6 +23,7 @@ module output_dma #(
     input wire [15:0] tile_oc_index,  // Current Output Channel Tile
 
     input wire relu_en,
+    input wire [1:0] stride,
     // URAM Interface (Read Port)
     output reg [15:0] uram_addr,
     input wire [URAM_WIDTH-1:0] uram_rdata,
@@ -43,11 +44,12 @@ module output_dma #(
     // Calculate Packing Density
     localparam BITS_PER_PIXEL_BLOCK = OC_PAR * DATA_WIDTH; 
     
+    wire [15:0] out_width = img_width / stride;
     // Stride Calculations (in Bytes)
-    wire [63:0] bits_per_row = img_width * BITS_PER_PIXEL_BLOCK;
+    wire [63:0] bits_per_row = out_width * BITS_PER_PIXEL_BLOCK;
     wire [63:0] words_per_row = bits_per_row / HBM_DATA_WIDTH;
 
-    wire [63:0] stride_oc_tile_words = words_per_row * TILE_HEIGHT;
+    wire [63:0] stride_oc_tile_words = words_per_row * (TILE_HEIGHT / stride);
     wire [63:0] stride_height_tile_words = stride_oc_tile_words * (oc_channels / OC_PAR);
 
     // Base Address for this Tile
@@ -55,8 +57,12 @@ module output_dma #(
                                  (tile_oc_index * stride_oc_tile_words);
 
     // Serialization Constants
+    // TODO: What happens when QUANTIZED_BLOCK_WIDTH < HBM_DATA_WIDTH?
     localparam QUANTIZED_BLOCK_WIDTH = PP_PAR * OC_PAR * DATA_WIDTH;
-    localparam CHUNKS_PER_URAM_WORD = QUANTIZED_BLOCK_WIDTH / HBM_DATA_WIDTH; 
+    localparam CHUNKS_PER_URAM_WORD = QUANTIZED_BLOCK_WIDTH / HBM_DATA_WIDTH;
+    // TODO: Support non-divisible cases?
+    wire [7:0] chunks_per_word = CHUNKS_PER_URAM_WORD / stride;
+
     reg [4:0] quant_shift = 10;
     
     reg [QUANTIZED_BLOCK_WIDTH-1:0] quantized_data;
@@ -93,10 +99,10 @@ module output_dma #(
     end
  
     // Total URAM words to read = (Width / PP_PAR) * Height
-    wire [15:0] total_uram_words = (img_width / PP_PAR) * TILE_HEIGHT;
+    wire [15:0] total_uram_words = (img_width / PP_PAR) * (TILE_HEIGHT / stride);
     
     // Total 512-bit words to write to HBM
-    wire [15:0] total_hbm_words = total_uram_words * CHUNKS_PER_URAM_WORD;
+    wire [15:0] total_hbm_words = total_uram_words * chunks_per_word;
 
     localparam S_IDLE        = 0;
     localparam S_START_AXI   = 1;
@@ -173,7 +179,7 @@ module output_dma #(
                     // Wait for Master to accept data
                     if (write_ready) begin
                         // Chunk accepted
-                        if (chunk_cnt == CHUNKS_PER_URAM_WORD - 1) begin
+                        if (chunk_cnt == chunks_per_word - 1) begin
                             // Finished one URAM word
                             chunk_cnt <= 0;
                             

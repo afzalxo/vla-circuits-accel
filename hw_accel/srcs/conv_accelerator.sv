@@ -18,6 +18,7 @@ module conv_accelerator #(
     input wire signed [OC_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] weights,
     output wire [1:0] k_x,
     output wire [1:0] k_y,
+    input wire [1:0] stride,
     output wire weight_req,
     input wire weight_ack,
     
@@ -52,6 +53,7 @@ module conv_accelerator #(
 	.uram_replay(uram_replay),
         .lb_shift_en(lb_shift_en), .seq_load(seq_load),
         .k_x(k_x), .k_y(k_y),
+	.stride(stride),
         .cu_en(cu_en), .cu_clear(cu_clear),
         .col_idx(col_idx), .row_idx(row_idx),
         .dout_valid(dout_valid), .done(done)

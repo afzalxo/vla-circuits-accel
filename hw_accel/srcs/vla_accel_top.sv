@@ -285,6 +285,8 @@ module vla_accel_top #(
     assign m_axi_gmem_rready  = sched_rready | feat_rready;
 
     wire relu_en;
+    wire [1:0] stride;
+    wire [2:0] log2_mem_tile_height;
 
     instruction_scheduler #(
 	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -318,6 +320,8 @@ module vla_accel_top #(
 	.cfg_quant_shift(quant_shift),
 	.cfg_is_conv(is_conv),
 	.cfg_relu_en(relu_en),
+	.cfg_stride(stride),
+	.cfg_log2_mem_tile_height(log2_mem_tile_height),
 	.cfg_input_bank(cfg_input_bank),
 	.cfg_output_bank(cfg_output_bank)
     );
@@ -343,6 +347,8 @@ module vla_accel_top #(
 	.weight_words(weight_words),
 	.fmap_out_words(output_feature_map_words),
 	.relu_en(relu_en),
+	.stride(stride),
+	.log2_mem_tile_height(log2_mem_tile_height),
 	// FMap HBM interface	
 	.hbm_data_in(read_master_data_out),
 	.hbm_addr(hbm_input_addr_w),
