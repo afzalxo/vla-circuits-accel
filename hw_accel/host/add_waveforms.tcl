@@ -98,3 +98,10 @@ add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/hbm_
 add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/m_axi_fo_gmem_awvalid}} 
 
 add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/feat_arvalid}} 
+
+add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/col_idx}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/row_idx}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/dout_valid}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/state}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/load_col_cnt}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/load_row_cnt}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/ctrl/pipe_flush_cnt}} 
+
+
+add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/lb/row_0}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/lb/row_1}} {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/lb/row_2}} 
+
+add_wave {{/pfm_top_wrapper/pfm_top_i/pfm_dynamic_inst/vla_accel_top_0/inst/tile_manager_inst/acc/lb/shift_en}} 

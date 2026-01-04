@@ -136,7 +136,7 @@ module vla_accel_top #(
 
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = current_input_base + cfg_input_offset + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + (hbm_winput_addr << 6);
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + cfg_weight_offset + (hbm_winput_addr << 6);
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = current_output_base + cfg_output_offset + (hbm_foutput_addr << 6);
 
     vla_accel_control_s_axi #(
@@ -346,6 +346,7 @@ module vla_accel_top #(
 	.feature_map_words(feature_map_words),
 	.weight_words(weight_words),
 	.fmap_out_words(output_feature_map_words),
+	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
 	.log2_mem_tile_height(log2_mem_tile_height),

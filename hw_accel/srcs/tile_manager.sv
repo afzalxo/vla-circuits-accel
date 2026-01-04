@@ -24,6 +24,7 @@ module tile_manager #(
     output wire [15:0] weight_words,
     output wire [15:0] fmap_out_words,
     
+    input wire [4:0] quant_shift,
     input wire relu_en,
     input wire [1:0] stride,
     input wire [2:0] log2_mem_tile_height,
@@ -174,6 +175,7 @@ module tile_manager #(
 	.oc_channels(output_channels),
 	.tile_y_index(current_tile_y),
 	.tile_oc_index(current_tile_oc),
+	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
 	.write_count(fmap_out_words),

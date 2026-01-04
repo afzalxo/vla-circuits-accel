@@ -22,6 +22,7 @@ module output_dma #(
     input wire [15:0] tile_y_index,   // Current Vertical Tile
     input wire [15:0] tile_oc_index,  // Current Output Channel Tile
 
+    input wire [4:0] quant_shift,
     input wire relu_en,
     input wire [1:0] stride,
     // URAM Interface (Read Port)
@@ -63,8 +64,6 @@ module output_dma #(
     // TODO: Support non-divisible cases?
     wire [7:0] chunks_per_word = CHUNKS_PER_URAM_WORD / stride;
 
-    reg [4:0] quant_shift = 10;
-    
     reg [QUANTIZED_BLOCK_WIDTH-1:0] quantized_data;
     integer p, o;
     always @(*) begin
@@ -129,7 +128,6 @@ module output_dma #(
             word_cnt <= 0;
             chunk_cnt <= 0;
             write_data <= 0;
-	    quant_shift <= 10;   // TODO: Make configurable
         end else begin
             start_write <= 0;
             done <= 0;
