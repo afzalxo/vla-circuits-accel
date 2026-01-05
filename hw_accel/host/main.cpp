@@ -15,18 +15,17 @@
 #include <CL/cl2.hpp>
 #include "xcl2.hpp"
 
-// --- HARDWARE CONSTANTS ---
 constexpr uint16_t IC_PAR = 16;
 constexpr uint16_t OC_PAR = 16;
 constexpr uint16_t PP_PAR = 8;
 constexpr uint16_t TILE_HEIGHT = 4;
 constexpr size_t INSTR_SECTION_SIZE = 64 * 1024;
 
-// --- OPCODES ---
+// opcodes
 constexpr uint8_t OP_CONV = 1;
 constexpr uint8_t OP_HALT = 255;
 
-// --- USER CONFIGURATION STRUCT ---
+// User-defined Layer Configuration
 struct LayerConfig {
     std::string name;
     int in_w, in_h, in_c;
@@ -38,22 +37,26 @@ struct LayerConfig {
     std::string golden_file; // For verification
 };
 
-// --- N-ISA INSTRUCTION STRUCT (Hardware Layout) ---
+// N-ISA Instruction Format
 struct alignas(64) NISA_Instruction {
-    uint64_t input_offset;   
-    uint64_t output_offset;  
-    uint64_t weight_offset;  
-    uint16_t width;          
-    uint16_t height;         
-    uint16_t in_channels;    
-    uint16_t out_channels;   
-    uint8_t  opcode;         
-    uint8_t  quant_shift;    
-    uint8_t  bank_sel;       
-    uint8_t  relu_en;        
-    uint8_t  stride;         
-    uint8_t  log2_mem_tile_height; 
-    uint8_t  padding[26];    
+    uint64_t input_offset;     // [63:0]
+    uint64_t output_offset;    // [127:64]
+    uint64_t weight_offset;    // [191:128]
+    uint16_t width;            // [207:192]
+    uint16_t height;           // [223:208]
+    uint16_t in_channels;      // [239:224]
+    uint16_t out_channels;     // [255:240]
+    uint8_t  opcode;           // [263:256]
+    uint8_t  quant_shift;      // [271:264]
+    uint8_t  bank_sel;         // [279:272]
+    uint8_t  relu_en;          // [287:280]
+    uint8_t  stride;           // [295:288]
+    uint8_t  log2_mem_tile_height;  // [303:296]
+    uint8_t  is_sparse;             // [311:304]
+    // Compiler inserts implicit padding 8-bit here     // [319:312]
+    uint32_t ic_tile_mask;          // [351:320]
+    uint32_t oc_tile_mask;          // [383:352]
+    uint8_t  padding[16];           // [511:384] - Padding to make 64 bytes
 };
 
 // --- HELPER FUNCTIONS ---
@@ -320,7 +323,22 @@ int main(int argc, char **argv) {
         // L1 Input is L0 Output. If L0 stride=2, L1 Input is packed at TILE_HEIGHT/2 (log2=1)
         int mem_tile_h = (i == 0) ? TILE_HEIGHT : (TILE_HEIGHT / prev_stride);
         instr.log2_mem_tile_height = (int)std::log2(mem_tile_h);
-
+	// instr.is_sparse = 0;
+	// instr.ic_tile_mask = 0xFFFFFFFF;
+	// instr.oc_tile_mask = 0xFFFFFFFF;
+	if (i == 0) {
+	   instr.is_sparse = 1;
+	   instr.ic_tile_mask = 0x00000001;
+	   instr.oc_tile_mask = 0x00000001;
+	} else if (i == 1) {
+	   instr.is_sparse = 1;
+	   instr.ic_tile_mask = 0x00000001;
+	   instr.oc_tile_mask = 0x00000001;
+	} else if (i == 2) {
+	   instr.is_sparse = 1;
+	   instr.ic_tile_mask = 0x00000001;
+	   instr.oc_tile_mask = 0x0000000F;
+	}
         // Update state for next layer
         prev_bank = out_bank;
         prev_stride = layer.stride;
@@ -329,6 +347,9 @@ int main(int argc, char **argv) {
     // HALT Instruction
     instr_list[layers.size()].opcode = OP_HALT;
 
+    std::cout << "Size of NISA instruction struct (in bytes): " << sizeof(NISA_Instruction) << std::endl;
+    std::cout << "Length of instruction list: " << instr_list.size() << std::endl;
+    std::cout << "Length of layers list: " << layers.size() << std::endl;
     // Copy to Heap
     memcpy(host_heap.data(), instr_list.data(), sizeof(NISA_Instruction) * instr_list.size());
 
@@ -363,7 +384,7 @@ int main(int argc, char **argv) {
     // Odd layers (1, 3) -> BufA. Even layers (2, 4) -> BufB.
     // Note: layers.size() is 1-based count.
     cl::Buffer* final_buf = (layers.size() % 2 != 0) ? &d_buf_a : &d_buf_b;
-    // cl::Buffer* final_buf = &d_buf_a;
+    // cl::Buffer* final_buf = &d_buf_b;
     
     auto& last_layer = layers.back();
     size_t out_bytes = (last_layer.in_w / last_layer.stride) * 

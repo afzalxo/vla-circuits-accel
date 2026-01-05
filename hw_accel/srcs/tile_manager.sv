@@ -28,6 +28,9 @@ module tile_manager #(
     input wire relu_en,
     input wire [1:0] stride,
     input wire [2:0] log2_mem_tile_height,
+    input wire is_sparse,
+    input wire [31:0] ic_tile_mask,
+    input wire [31:0] oc_tile_mask,
     // Input FMap DMA Interface
     input wire [PP_PAR*IC_PAR*DATA_WIDTH-1:0] hbm_data_in,
     output wire [63:0] hbm_addr,
@@ -235,6 +238,8 @@ module tile_manager #(
     localparam S_ACC_STREAM = 3;
     localparam S_ACC_WAIT = 4;
     localparam S_NEXT_TILE = 5;
+    localparam S_CHECK_IC_MASK = 9;
+    localparam S_CHECK_OC_MASK = 10;
     localparam S_WRITE_OUTPUT = 8;
  
     integer p, o;
@@ -319,11 +324,15 @@ module tile_manager #(
 		    for (i = 0; i < (TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR; i = i + 1) begin
 			uram_input[i] <= 0;
 		    end
-		    dma_start <= 1;
-                    weights_dma_start <= 1;
-                    dma_done_r <= 0;
-                    dma_w_done_r <= 0;
-		    state <= S_DMA_FM;
+		    if (is_sparse) begin
+			state <= S_CHECK_OC_MASK;
+		    end else begin
+		        dma_start <= 1;
+                        weights_dma_start <= 1;
+                        dma_done_r <= 0;
+                        dma_w_done_r <= 0;
+		        state <= S_DMA_FM;
+	    	    end
 		end
                 
                 // 1. Load Tile from HBM to URAM
@@ -380,16 +389,33 @@ module tile_manager #(
 		    dma_done_r <= 0;
 		    dma_w_done_r <= 0;
 		    if (current_tile_ic + 1 >= num_tiles_ic) begin
-			state <= S_WRITE_OUTPUT;
 			output_dma_start <= 1;      // Trigger Output DMA
 			current_tile_ic <= 0;
+			state <= S_WRITE_OUTPUT;
 		    end else begin
 			current_tile_ic <= current_tile_ic + 1;
+			// dma_start <= 1;
+			// weights_dma_start <= 1;
+			// state <= S_DMA_FM;
+			if (is_sparse) begin
+			    state <= S_CHECK_IC_MASK;
+			end else begin
+			    dma_start <= 1;
+			    weights_dma_start <= 1;
+			    state <= S_DMA_FM;
+			end
+		    end
+                end
+
+		S_CHECK_IC_MASK: begin
+		    if (ic_tile_mask[current_tile_ic] == 1'b0) begin
+			state <= S_NEXT_TILE;
+		    end else begin
 			dma_start <= 1;
 			weights_dma_start <= 1;
 			state <= S_DMA_FM;
 		    end
-                end
+		end
 
 		S_WRITE_OUTPUT: begin
                     output_dma_start <= 0;
@@ -413,12 +439,45 @@ module tile_manager #(
                         end else begin
                             current_tile_oc <= current_tile_oc + 1;
 			    current_tile_ic <= 0;
-                            dma_start <= 1;
-			    weights_dma_start <= 1;
-                            state <= S_DMA_FM;
+                            // dma_start <= 1;
+			    // weights_dma_start <= 1;
+                            // state <= S_DMA_FM;
+			    if (is_sparse) begin
+			        state <= S_CHECK_OC_MASK;
+			    end else begin
+				dma_start <= 1;
+				weights_dma_start <= 1;
+				state <= S_DMA_FM;
+			    end
                         end
                     end
                 end
+
+		S_CHECK_OC_MASK: begin
+	            if (oc_tile_mask[current_tile_oc] == 1'b0) begin
+			if (current_tile_oc + 1 >= num_tiles_oc) begin
+			    // Done with all OC tiles for this Y
+			    // Next Y tile
+			    if (current_tile_y + 1 >= num_tiles_y) begin
+				// All done
+				done <= 1;
+				dma_start <= 0;
+				weights_dma_start <= 0;
+				state <= S_IDLE;
+			    end else begin
+				current_tile_y <= current_tile_y + 1;
+				current_tile_oc <= 0;
+				current_tile_ic <= 0;
+				state <= S_INIT_URAM;
+			    end
+			end else begin
+			    current_tile_oc <= current_tile_oc + 1;
+			    state <= S_CHECK_OC_MASK;
+		        end
+		    end else begin
+			state <= S_CHECK_IC_MASK;
+		    end
+		end
             endcase
         end
     end

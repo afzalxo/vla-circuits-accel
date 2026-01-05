@@ -124,12 +124,31 @@ Please use the variable `quant_shift` in `tile_manager.sv` to set the appropriat
 - [x]   **Full Image Verification:** Run the emulation on a complete $128 \times 128$ image to verify tile switching logic and currect output computation for one conv layer.  **Update (23 Dec): Full image verification successful; Tested for various image sizes from H/W = 8/8 to H/W = 128/128 and for IC/OC = 16/16 to IC/OC = 64. Takes around 3ms for convolution between HxWxIC = 128x128x64 feature map with kernel of shape 3x3xICxOC = 3x3x64x64.**
 - [x]   **ReLU Activation:** Integrate ReLU activation as a post-processing after computing current H/OC tile.  **Update (26 Dec): ReLU activation added in `output_dma.sv`, configurable on/off using the instruction packet's `relu_en` flag.**
 - [x]   **Strided Convolution:** Extend the `window_sequencer.sv` to support strided convolutions (currently only stride=1 is supported). **Update (30 Dec): Strided convolution support added with stride=1 and stride=2 supported. Controlled via the instruction packet's `stride` field. Verified for stride=2 convolutions on 2-layers each with stride=2**
-- [x]   **Real Data Verification**: Integrate loading of real features and weights from binary files (instead of random data), and verify against golden outputs from PyTorch model. **Update (2 Jan): Verified functional equivalence. Generated true input features and weights for a specific task and tested by importing the data into the host code for a 3-layer system.**
+- [x]   **Real Data Verification**: Integrate loading of real features and weights from binary files (instead of random data), and verify against golden outputs from PyTorch model. **Update (2 Jan): Verified functional equivalence. Generated true input features and weights for a specific task and tested by importing the data into the host code for a 3-layer system. Takes around 0.2 ms for 3-layers: 64x64x16x32, 32x32x32x64, 16x16x64x128 (HxWxICxOC).**
 - [ ]   **Pooling:**  TODO: Check if it requires considerable effort to implement this (since it leads to downsampling, same as strided conv).
 - [x]   **Re-Quantization:** Implement re-quantization logic after ReLU to map outputs of accumulator bit-width (28-bits) back to int8 range. **Update (23rd December): Re-quantization/scaling of fmap outputs has been added (need to adjust the `quant_shift` variable according to data scale**)
 - [x]   **ISA:** Integrate a basic ISA with instructions `CONV` and `HALT` for multi-layer support. **Update (26 Dec): ISA added. Host creates an instruction with opcodes CONV and HALT and writes it to the heap (HBM[0] starting 64KB portion). The `instruction_scheduler.sv` module is responsible for fetching/decoding/executing instructions. Currently only CONV and HALT are supported.**
 - [x]   **Multi-Layer Support:** Extend accelerator to support multiple conv layers in sequence.  **Update (26 Dec): Multi-layer support added. Host code now creates multiple CONV instructions in sequence and writes them to HBM[0] heap. The accelerator processes them one after another until HALT is encountered. Verified for 3-layer conv sequence. Takes around 3ms for a 64x64x64x64 convolution using PP_PAR/IC_PAR/OC_PAR/TILE_HEIGHT = 8/16/16/4**
-- [ ]   **N-ISA Integration:** Integrate provision for computing only specific (`oc_tile`, `ic_tile`) pairs per layer, skipping the rest. This is needed for sparsity. Use a mask-based approach: host tells the accelerator which `oc_tiles` and `ic_tiles` to compute using a mask. Accelerator checks the mask and only loads/computes for those tiles.
+- [x]   **N-ISA Integration:** Integrate provision for computing only specific (`oc_tile`, `ic_tile`) pairs per layer, skipping the rest. This is needed for sparsity. Use a mask-based approach: host tells the accelerator which `oc_tiles` and `ic_tiles` to compute using a mask. Accelerator checks the mask and only loads/computes for those tiles.
+
+I evaluated the N-ISA accelerator on a 3-layer VLA CNN workload (from our original dense model). By utilizing the instruction set to mask out inactive tiles (simulating task-specific circuits), we observed that the hardware latency scales linearly with the reduction in workload.
+
+| Sparsity Level | Layer | Active / Total IC Tiles | Active / Total OC Tiles | Layer Workload (%) | Total Latency (Cycles) | Speedup |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Baseline (Dense)** | **L0** | 1 / 1 | 2 / 2 | 100% | **60,380** | **1.0x** |
+| | **L1** | 2 / 2 | 4 / 4 | 100% | | |
+| | **L2** | 4 / 4 | 8 / 8 | 100% | | |
+| | | | | | | |
+| **50% Sparsity** | **L0** | 1 / 1 | 2 / 2 | 100% | **30,268** | **1.99x** |
+| | **L1** | 1 / 2 | 2 / 4 | 25% | | |
+| | **L2** | 2 / 4 | 4 / 8 | 25% | | |
+| | | | | | | |
+| **75% Sparsity** | **L0** | 1 / 1 | 1 / 2 | 50% | **15,389** | **3.92x** |
+| | **L1** | 1 / 2 | 1 / 4 | 12.5% | | |
+| | **L2** | 1 / 4 | 4 / 8 | 12.5% | | |
+
+**Key Takeaway:** The results demonstrate that N-ISA achieves **deterministic latency reduction**. A 50% reduction in compute workload results in a ~2x speedup, and a 75% reduction results in a ~4x speedup. This confirms that the overhead of the instruction scheduler and DMA management is effectively hidden, allowing the hardware to exploit sparsity with near-perfect efficiency.
+
 - [ ]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
 
 ---

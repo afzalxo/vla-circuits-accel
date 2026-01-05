@@ -42,6 +42,9 @@ module instruction_scheduler #(
     output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_stride,
     output reg [2:0]  cfg_log2_mem_tile_height,
+    output reg        cfg_is_sparse,
+    output reg [31:0] cfg_ic_tile_mask,
+    output reg [31:0] cfg_oc_tile_mask,
     output reg [1:0]  cfg_input_bank,
     output reg [1:0]  cfg_output_bank
 );
@@ -64,6 +67,7 @@ module instruction_scheduler #(
 
     reg [3:0] state;
     reg [ADDR_WIDTH-1:0] pc; // Program Counter (Current Instruction Address)
+    reg [63:0] cc_counter;
     
     // Instruction Register
     reg [DATA_WIDTH-1:0] instr_reg;
@@ -83,6 +87,7 @@ module instruction_scheduler #(
             m_axi_araddr <= 0;
             tm_start <= 0;
             pc <= 0;
+	    cc_counter <= 0;
             // Config defaults
             cfg_input_addr <= 0;
             cfg_output_addr <= 0;
@@ -101,12 +106,13 @@ module instruction_scheduler #(
             // Default Pulses
             tm_start <= 0;
             done <= 0;
-
+	    cc_counter <= cc_counter + 1;
             case (state)
                 S_IDLE: begin
                     if (start) begin
                         pc <= base_addr;
                         state <= S_FETCH_REQ;
+			cc_counter <= 0;
                     end
                 end
 
@@ -173,11 +179,14 @@ module instruction_scheduler #(
 			state <= S_DONE;
 		    end
 
-		    cfg_input_bank  <= instr_reg[273:272];
-		    cfg_output_bank <= instr_reg[275:274];
-		    cfg_relu_en     <= instr_reg[280];
-		    cfg_stride      <= instr_reg[289:288];
+		    cfg_input_bank  	 <= instr_reg[273:272];
+		    cfg_output_bank 	 <= instr_reg[275:274];
+		    cfg_relu_en     	 <= instr_reg[280];
+		    cfg_stride      	 <= instr_reg[289:288];
 		    cfg_log2_mem_tile_height <= instr_reg[298:296];
+		    cfg_is_sparse   	 <= instr_reg[304];
+		    cfg_ic_tile_mask     <= instr_reg[351:320];
+		    cfg_oc_tile_mask     <= instr_reg[383:352];
                 end
 
                 // 4. Execute Layer

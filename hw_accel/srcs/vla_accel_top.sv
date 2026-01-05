@@ -287,6 +287,9 @@ module vla_accel_top #(
     wire relu_en;
     wire [1:0] stride;
     wire [2:0] log2_mem_tile_height;
+    wire is_sparse;
+    wire [31:0] ic_tile_mask;
+    wire [31:0] oc_tile_mask;
 
     instruction_scheduler #(
 	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -322,6 +325,9 @@ module vla_accel_top #(
 	.cfg_relu_en(relu_en),
 	.cfg_stride(stride),
 	.cfg_log2_mem_tile_height(log2_mem_tile_height),
+	.cfg_is_sparse(is_sparse),
+	.cfg_ic_tile_mask(ic_tile_mask),
+	.cfg_oc_tile_mask(oc_tile_mask),
 	.cfg_input_bank(cfg_input_bank),
 	.cfg_output_bank(cfg_output_bank)
     );
@@ -350,6 +356,9 @@ module vla_accel_top #(
 	.relu_en(relu_en),
 	.stride(stride),
 	.log2_mem_tile_height(log2_mem_tile_height),
+	.is_sparse(is_sparse),
+	.ic_tile_mask(ic_tile_mask),
+	.oc_tile_mask(oc_tile_mask),
 	// FMap HBM interface	
 	.hbm_data_in(read_master_data_out),
 	.hbm_addr(hbm_input_addr_w),
