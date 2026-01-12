@@ -65,7 +65,7 @@ module instruction_scheduler #(
     localparam S_DONE        = 7;
     localparam S_FETCH_ACK   = 8;
 
-    reg [3:0] state;
+    reg [3:0] instruction_scheduler_state;
     reg [ADDR_WIDTH-1:0] pc; // Program Counter (Current Instruction Address)
     reg [63:0] cc_counter;
     
@@ -75,12 +75,12 @@ module instruction_scheduler #(
 
     // Opcode Definitions
     localparam OP_CONV  = 8'h01;
-    localparam OP_DENSE = 8'h02;
+    localparam OP_GEMM = 8'h02;
     localparam OP_HALT  = 8'hFF;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
+            instruction_scheduler_state <= S_IDLE;
             done <= 0;
             m_axi_arvalid <= 0;
             m_axi_rready <= 0;
@@ -107,11 +107,11 @@ module instruction_scheduler #(
             tm_start <= 0;
             done <= 0;
 	    cc_counter <= cc_counter + 1;
-            case (state)
+            case (instruction_scheduler_state)
                 S_IDLE: begin
                     if (start) begin
                         pc <= base_addr;
-                        state <= S_FETCH_REQ;
+                        instruction_scheduler_state <= S_FETCH_REQ;
 			cc_counter <= 0;
                     end
                 end
@@ -120,14 +120,14 @@ module instruction_scheduler #(
                 S_FETCH_REQ: begin
                     m_axi_araddr <= pc;
                     m_axi_arvalid <= 1;
-		    state <= S_FETCH_ACK;
+		    instruction_scheduler_state <= S_FETCH_ACK;
                 end
 
 		S_FETCH_ACK: begin
 		    if (m_axi_arready) begin
                         m_axi_arvalid <= 0; // Deassert
                         m_axi_rready <= 1;  // Ready to receive data
-                        state <= S_FETCH_WAIT;
+                        instruction_scheduler_state <= S_FETCH_WAIT;
                     end
 		end
 
@@ -136,7 +136,7 @@ module instruction_scheduler #(
                     if (m_axi_rvalid) begin
                         instr_reg <= m_axi_rdata;
                         m_axi_rready <= 0;
-                        state <= S_DECODE;
+                        instruction_scheduler_state <= S_DECODE;
                     end
                 end
 
@@ -165,20 +165,6 @@ module instruction_scheduler #(
                     cfg_in_channels  <= instr_reg[239:224];
                     cfg_out_channels <= instr_reg[255:240];
                     
-                    // Opcode Check
-                    if (opcode == OP_HALT) begin
-			cfg_is_conv <= 0;
-			cfg_quant_shift <= 0;
-                        state <= S_DONE;
-                    end else if (opcode == OP_CONV) begin
-                        cfg_is_conv <= (opcode == OP_CONV);
-			cfg_quant_shift <= instr_reg[268:264];
-                        state <= S_EXECUTE;
-		    end else begin
-			$display("ERROR: Unknown Opcode %h at PC %h", opcode, pc);
-			state <= S_DONE;
-		    end
-
 		    cfg_input_bank  	 <= instr_reg[273:272];
 		    cfg_output_bank 	 <= instr_reg[275:274];
 		    cfg_relu_en     	 <= instr_reg[280];
@@ -187,25 +173,46 @@ module instruction_scheduler #(
 		    cfg_is_sparse   	 <= instr_reg[304];
 		    cfg_ic_tile_mask     <= instr_reg[351:320];
 		    cfg_oc_tile_mask     <= instr_reg[383:352];
+
+                    // Opcode Check
+                    if (opcode == OP_HALT) begin
+			cfg_is_conv <= 0;
+			cfg_quant_shift <= 0;
+                        instruction_scheduler_state <= S_DONE;
+                    end else if (opcode == OP_CONV) begin
+                        cfg_is_conv <= (opcode == OP_CONV);
+			cfg_quant_shift <= instr_reg[268:264];
+                        instruction_scheduler_state <= S_EXECUTE;
+		    end else if (opcode == OP_GEMM) begin
+			cfg_is_conv <= 0;
+			cfg_img_width <= instr_reg[207:192];
+			cfg_img_height <= 16'd1;
+			cfg_stride <= 2'b01;
+			cfg_quant_shift <= instr_reg[268:264];
+			instruction_scheduler_state <= S_EXECUTE;
+		    end else begin
+			$display("ERROR: Unknown Opcode %h at PC %h", opcode, pc);
+			instruction_scheduler_state <= S_DONE;
+		    end
                 end
 
                 // 4. Execute Layer
                 S_EXECUTE: begin
                     tm_start <= 1; // Pulse start to Tile Manager
-                    state <= S_WAIT_TM;
+                    instruction_scheduler_state <= S_WAIT_TM;
                 end
 
                 // 5. Wait for Layer Completion
                 S_WAIT_TM: begin
                     if (tm_done) begin
-                        state <= S_NEXT_INSTR;
+                        instruction_scheduler_state <= S_NEXT_INSTR;
                     end
                 end
 
                 // 6. Update Program Counter
                 S_NEXT_INSTR: begin
                     pc <= pc + 64; // Move 64 bytes (512 bits) forward
-                    state <= S_FETCH_REQ;
+                    instruction_scheduler_state <= S_FETCH_REQ;
                 end
 
                 S_DONE: begin
@@ -213,7 +220,7 @@ module instruction_scheduler #(
                     // Wait for reset or new start
                     if (start) begin
                         pc <= base_addr;
-                        state <= S_FETCH_REQ;
+                        instruction_scheduler_state <= S_FETCH_REQ;
                     end
                 end
             endcase

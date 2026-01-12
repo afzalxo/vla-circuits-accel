@@ -22,6 +22,8 @@ module output_dma #(
     input wire [15:0] tile_y_index,   // Current Vertical Tile
     input wire [15:0] tile_oc_index,  // Current Output Channel Tile
 
+    input wire [15:0] active_height,
+
     input wire [4:0] quant_shift,
     input wire relu_en,
     input wire [1:0] stride,
@@ -50,7 +52,7 @@ module output_dma #(
     wire [63:0] bits_per_row = out_width * BITS_PER_PIXEL_BLOCK;
     wire [63:0] words_per_row = bits_per_row / HBM_DATA_WIDTH;
 
-    wire [63:0] stride_oc_tile_words = words_per_row * (TILE_HEIGHT / stride);
+    wire [63:0] stride_oc_tile_words = words_per_row * (active_height / stride);
     wire [63:0] stride_height_tile_words = stride_oc_tile_words * (oc_channels / OC_PAR);
 
     // Base Address for this Tile
@@ -67,6 +69,7 @@ module output_dma #(
     reg [QUANTIZED_BLOCK_WIDTH-1:0] quantized_data;
     integer p, o;
     always @(*) begin
+	quantized_data = 0;
         for (p = 0; p < PP_PAR; p = p + 1) begin
             for (o = 0; o < OC_PAR; o = o + 1) begin
                 // 1. Extract 28-bit Accumulator
@@ -98,7 +101,7 @@ module output_dma #(
     end
  
     // Total URAM words to read = (Width / PP_PAR) * Height
-    wire [15:0] total_uram_words = (img_width / PP_PAR) * (TILE_HEIGHT / stride);
+    wire [15:0] total_uram_words = (img_width / PP_PAR) * (active_height / stride);
     
     // Total 512-bit words to write to HBM
     wire [15:0] total_hbm_words = total_uram_words * chunks_per_word;
@@ -111,13 +114,13 @@ module output_dma #(
     localparam S_WAIT_DONE   = 5;
     localparam S_DONE        = 6;
     
-    reg [2:0] state;
+    reg [2:0] output_dma_state;
     reg [15:0] word_cnt;      // URAM words processed
     reg [7:0] chunk_cnt;      // 512-bit chunks processed for current URAM word
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
+            output_dma_state <= S_IDLE;
             done <= 0;
             start_write <= 0;
             write_valid <= 0;
@@ -132,7 +135,7 @@ module output_dma #(
             start_write <= 0;
             done <= 0;
             
-            case (state)
+            case (output_dma_state)
                 S_IDLE: begin
                     write_valid <= 0;
                     if (start) begin
@@ -145,7 +148,7 @@ module output_dma #(
                         word_cnt <= 0;
                         chunk_cnt <= 0;
                         
-                        state <= S_START_AXI;
+                        output_dma_state <= S_START_AXI;
                     end
                 end
                 
@@ -153,23 +156,23 @@ module output_dma #(
                     // Pulse start for the AXI Master
                     start_write <= 1;
 		    uram_ren <= 1;
-                    state <= S_READ_URAM;
+                    output_dma_state <= S_READ_URAM;
                 end
                 
                 S_READ_URAM: begin
                     // Address is already set (starts at 0, increments in S_SERIALIZE)
                     // Just wait for RAM latency
 		    uram_ren <= 0;
-                    state <= S_WAIT_URAM;
+                    output_dma_state <= S_WAIT_URAM;
                 end
                 
                 S_WAIT_URAM: begin
                     // Data available at end of this cycle (assuming 1 cycle latency)
-                    // If BRAM has 2 cycle latency, add another wait state.
-		    write_data <= quantized_data[0 +: HBM_DATA_WIDTH]; // uram_rdata[0 +: HBM_DATA_WIDTH];
+                    // If BRAM has 2 cycle latency, add another wait output_dma_state.
+		    write_data <= quantized_data[0 +: HBM_DATA_WIDTH];
 		    write_valid <= 1;
 		    chunk_cnt <= 0;
-                    state <= S_SERIALIZE;
+                    output_dma_state <= S_SERIALIZE;
                 end
                 
                 S_SERIALIZE: begin
@@ -184,18 +187,18 @@ module output_dma #(
                             if (word_cnt == total_uram_words - 1) begin
                                 // All data sent
                                 write_valid <= 0;
-                                state <= S_WAIT_DONE;
+                                output_dma_state <= S_WAIT_DONE;
                             end else begin
                                 // Move to next URAM word
                                 word_cnt <= word_cnt + 1;
                                 uram_addr <= uram_addr + 1;
 				uram_ren <= 1;
                                 write_valid <= 0; // Pause valid while reading new data
-                                state <= S_READ_URAM;
+                                output_dma_state <= S_READ_URAM;
                             end
                         end else begin
                             chunk_cnt <= chunk_cnt + 1;
-			    write_data <= quantized_data[(chunk_cnt + 1) * HBM_DATA_WIDTH +: HBM_DATA_WIDTH];  // uram_rdata[(chunk_cnt + 1) * HBM_DATA_WIDTH +: HBM_DATA_WIDTH];
+			    write_data <= quantized_data[(chunk_cnt + 1) * HBM_DATA_WIDTH +: HBM_DATA_WIDTH];
 			    write_valid <= 1;
                         end
                     end
@@ -204,13 +207,13 @@ module output_dma #(
                 S_WAIT_DONE: begin
                     // Wait for AXI Master to finish the B-Channel response
                     if (write_done) begin
-                        state <= S_DONE;
+                        output_dma_state <= S_DONE;
                     end
                 end
                 
                 S_DONE: begin
                     done <= 1;
-                    state <= S_IDLE;
+                    output_dma_state <= S_IDLE;
                 end
             endcase
         end

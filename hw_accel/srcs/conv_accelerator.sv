@@ -19,6 +19,7 @@ module conv_accelerator #(
     output wire [1:0] k_x,
     output wire [1:0] k_y,
     input wire [1:0] stride,
+    input wire is_conv,
     output wire weight_req,
     input wire weight_ack,
     
@@ -39,7 +40,9 @@ module conv_accelerator #(
     
     // NEW: Wire for valid out (unused but good for debug)
     wire cu_valid_out;
-    wire uram_replay;
+
+    wire conv_controller_dout_valid;
+    assign dout_valid = is_conv ? conv_controller_dout_valid : cu_valid_out;
 
     conv_controller #(
         .MAX_IMG_WIDTH(MAX_IMG_WIDTH), .PP_PAR(PP_PAR)
@@ -50,13 +53,13 @@ module conv_accelerator #(
 	.num_ic_tiles(img_channels / IC_PAR),
 	.weight_req(weight_req),
 	.weight_ack(weight_ack),
-	.uram_replay(uram_replay),
         .lb_shift_en(lb_shift_en), .seq_load(seq_load),
         .k_x(k_x), .k_y(k_y),
 	.stride(stride),
+	.is_conv(is_conv),
         .cu_en(cu_en), .cu_clear(cu_clear),
         .col_idx(col_idx), .row_idx(row_idx),
-        .dout_valid(dout_valid), .done(done)
+        .dout_valid(conv_controller_dout_valid), .done(done)
     );
 
     line_buffer #(

@@ -149,6 +149,10 @@ I evaluated the N-ISA accelerator on a 3-layer VLA CNN workload (from our origin
 
 **Key Takeaway:** The results demonstrate that N-ISA achieves **deterministic latency reduction**. A 50% reduction in compute workload results in a ~2x speedup, and a 75% reduction results in a ~4x speedup. This confirms that the overhead of the instruction scheduler and DMA management is effectively hidden, allowing the hardware to exploit sparsity with near-perfect efficiency.
 
-- [ ]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment.
+- [x]   **GEMM Operation:** Implemented GEMM using 1x1 Conv, where for GEMM of dims M x K times K x N, the input feature map is of size H = 1, W = M, IC = K, OC = N. Verified functional correctness. **Update 12th Jan: GEMM operation added. Use main_test1x1.cpp to test. Use `OP_GEMM` for opcode in instruction packet. Verified for various sizes.**
+
+- [ ]   **End-to-End Model Testing:** Integrate the entire VLA model inference pipeline (multiple conv layers + dense layers). Testing VGG-style model with CARLA dataset. **Ongoing**
+
+- [x]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment. **Update 12th Jan: Dataset collected. Need to test whether its suitable since we are binning throttle, brake, and steering values into discrete classes.**
 
 ---

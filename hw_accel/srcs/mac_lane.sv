@@ -15,7 +15,7 @@ module mac_lane #(
     input wire signed [IC_PAR-1:0][DATA_WIDTH-1:0] weights,
     
     output reg signed [ACC_WIDTH-1:0] result,
-    output wire valid_out
+    output reg valid_out
 );
 
     localparam PIPE_DEPTH = 4;
@@ -40,8 +40,6 @@ module mac_lane #(
     wire valid_delayed = valid_pipe[PIPE_DEPTH-1];
     wire clear_delayed = clear_pipe[PIPE_DEPTH-1];
     
-    assign valid_out = valid_delayed;
-
     // --- DATA PIPELINE ---
     (* use_dsp = "yes" *) reg signed [15:0] products [0:IC_PAR-1];
     reg signed [16:0] sum_l1 [0:7];
@@ -83,6 +81,7 @@ module mac_lane #(
         if (!rst_n) begin
             result <= 0;
         end else begin
+	    valid_out <= valid_delayed;
             // Priority: Clear > Accumulate
             if (clear_delayed) begin
                 // If clearing, we reset. 

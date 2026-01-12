@@ -21,6 +21,7 @@ module tiled_dma #(
     input wire [15:0] img_channels,   // Number of Channels
     input wire [15:0] tile_y_index,   // Current vertical tile index
     input wire [15:0] tile_ic_index,  // Current IC tile index
+    input wire [15:0] active_height,
     input wire [2:0] log2_mem_tile_height, // (0=1, 1=2, 2=4)
 
     output wire [15:0] feature_map_words,
@@ -57,7 +58,7 @@ module tiled_dma #(
     // Start = Top Halo (-1 relative to tile)
     // End   = Bottom Halo (+TILE_HEIGHT relative to tile)
     wire signed [15:0] abs_start_row = (tile_y_index * TILE_HEIGHT) - 1;
-    wire signed [15:0] abs_end_row   = (tile_y_index * TILE_HEIGHT) + TILE_HEIGHT;
+    wire signed [15:0] abs_end_row   = (tile_y_index * TILE_HEIGHT) + active_height;
     
     // Current Row Iterator
     reg signed [15:0] curr_row;
@@ -87,7 +88,7 @@ module tiled_dma #(
     localparam S_WAIT = 4;
     localparam S_DONE = 5;
     
-    reg [2:0] state;
+    reg [2:0] tiled_dma_state;
     reg [15:0] beat_count;
     reg [15:0] req_count;
     reg [7:0] uram_beat_count;
@@ -96,7 +97,7 @@ module tiled_dma #(
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
+            tiled_dma_state <= S_IDLE;
             done_reg <= 0;
             hbm_ren <= 0;
 	    hbm_addr <= 0;
@@ -112,32 +113,32 @@ module tiled_dma #(
             uram_wen <= 0;
             done_reg <= 0;
             
-            case (state)
+            case (tiled_dma_state)
                 S_IDLE: begin
                     if (start) begin
 			curr_row <= abs_start_row;
                         uram_addr <= 0;
 			uram_beat_count <= 0;
-			state <= S_CHECK_BOUNDS;
+			tiled_dma_state <= S_CHECK_BOUNDS;
                     end
                 end
 
 		S_CHECK_BOUNDS: begin
                     if (curr_row > abs_end_row) begin
-                        state <= S_DONE;
+                        tiled_dma_state <= S_DONE;
                     end else begin
                         if (curr_row >= 0 && curr_row < img_height) begin
                             hbm_addr <= curr_row_base_addr;
 			    hbm_ren <= 1;
                             beat_count <= 0;
                             uram_beat_count <= 0;
-                            // Transition to REQ state to assert REN next cycle
-                            state <= S_READ; 
+                            // Transition to REQ tiled_dma_state to assert REN next cycle
+                            tiled_dma_state <= S_READ; 
                         end else begin
                             // PADDING ROW
                             uram_addr <= uram_addr + (img_width / PP_PAR);
                             curr_row <= curr_row + 1;
-                            state <= S_CHECK_BOUNDS;
+                            tiled_dma_state <= S_CHECK_BOUNDS;
                         end
                     end
                 end
@@ -159,7 +160,7 @@ module tiled_dma #(
                             hbm_ren <= 0;
                             beat_count <= 0;
                             uram_beat_count <= 0;
-                            state <= S_CHECK_BOUNDS;
+                            tiled_dma_state <= S_CHECK_BOUNDS;
                         end else begin
                             beat_count <= beat_count + 1;
 			    hbm_ren <= 1;
@@ -170,7 +171,7 @@ module tiled_dma #(
 
                 S_DONE: begin
                     done_reg <= 1;
-                    state <= S_IDLE;
+                    tiled_dma_state <= S_IDLE;
                 end
             endcase
         end

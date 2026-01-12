@@ -56,3 +56,15 @@ Added multi-layer support and a basic ISA that allows `CONV` and `HALT` instruct
 ## 30 Dec (HW Accel)
 
 Added strided convolutions.
+
+## 2 Jan (HW Accel)
+
+Real data verification
+
+## 12 Jan (Hw Accel)
+
+Added support for GEMM for dense layers. Moving towards end-to-end verification.
+
+## 12 Jan (Model + Dataset)
+
+Added dataset collection script for carla, and model+training script for carla dense lasso model.

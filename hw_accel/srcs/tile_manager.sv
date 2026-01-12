@@ -27,6 +27,7 @@ module tile_manager #(
     input wire [4:0] quant_shift,
     input wire relu_en,
     input wire [1:0] stride,
+    input wire is_conv,
     input wire [2:0] log2_mem_tile_height,
     input wire is_sparse,
     input wire [31:0] ic_tile_mask,
@@ -81,6 +82,9 @@ module tile_manager #(
 
     reg [15:0] current_tile_oc;
     
+    wire [15:0] rows_remaining = full_img_height - (current_tile_y * TILE_HEIGHT);
+    wire [15:0] active_height = (rows_remaining < TILE_HEIGHT) ? rows_remaining : TILE_HEIGHT;
+
     // DMA Signals
     reg dma_start;
     reg weights_dma_start;
@@ -132,6 +136,7 @@ module tile_manager #(
 	.feature_map_words(feature_map_words),
         .tile_y_index(current_tile_y),
 	.tile_ic_index(current_tile_ic),
+	.active_height(active_height),
 	.log2_mem_tile_height(log2_mem_tile_height),
         .hbm_data_in(hbm_data_in),
         .hbm_addr(hbm_addr),
@@ -155,6 +160,7 @@ module tile_manager #(
 	.weight_words(weight_words),
 	.ic_tile(current_tile_ic),
         .oc_tile(current_tile_oc),
+	.is_conv(is_conv),
 	.hbm_data_in(hbm_data_in_w),
         .hbm_addr(hbm_addr_w),
         .hbm_ren(hbm_ren_w),
@@ -178,6 +184,7 @@ module tile_manager #(
 	.oc_channels(output_channels),
 	.tile_y_index(current_tile_y),
 	.tile_oc_index(current_tile_oc),
+	.active_height(active_height),
 	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
@@ -200,11 +207,12 @@ module tile_manager #(
     ) acc (
         .clk(clk), .rst_n(rst_n), .start(acc_start),
         .img_width_strips(full_img_width_strips),
-        .img_height(TILE_HEIGHT + 2), // Accelerator sees a small image
+        .img_height(active_height + 2), // Accelerator sees a small image
 	.img_channels(full_img_channels),
         .weights(acc_weights_data),
 	.k_x(k_x), .k_y(k_y),
 	.stride(stride),
+	.is_conv(is_conv),
 	.weight_req(acc_weights_req),
 	.weight_ack(acc_weights_ack),
         .din_data(acc_din_data),
@@ -228,7 +236,7 @@ module tile_manager #(
 	end
     end
     
-    reg [3:0] state;
+    reg [3:0] tile_manager_state;
 
     localparam S_IDLE = 0;
     localparam S_DMA_FM  = 1;
@@ -250,7 +258,7 @@ module tile_manager #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             out_ptr <= 0;
-	end else if (state == S_ACC_START) begin
+	end else if (tile_manager_state == S_ACC_START) begin
 	    out_ptr <= 0;
 	    acc_out_row_cnt <= 0;
             acc_out_col_cnt <= 0;
@@ -291,7 +299,7 @@ module tile_manager #(
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= S_IDLE;
+            tile_manager_state <= S_IDLE;
             current_tile_y <= 0;
 	    current_tile_ic <= 0;
 	    current_tile_oc <= 0;
@@ -308,7 +316,7 @@ module tile_manager #(
 	    weights_dma_start <= 0;
 	    output_dma_start <= 0;
             acc_start <= 0;
-            case (state)
+            case (tile_manager_state)
                 S_IDLE: begin
 		    done <= 0;
                     if (start) begin
@@ -316,7 +324,7 @@ module tile_manager #(
 			current_tile_ic <= 0;
 			current_tile_oc <= 0;
                         out_ptr <= 0; // Reset output pointer
-                        state <= S_INIT_URAM;
+                        tile_manager_state <= S_INIT_URAM;
                     end
                 end
 
@@ -325,13 +333,13 @@ module tile_manager #(
 			uram_input[i] <= 0;
 		    end
 		    if (is_sparse) begin
-			state <= S_CHECK_OC_MASK;
+			tile_manager_state <= S_CHECK_OC_MASK;
 		    end else begin
 		        dma_start <= 1;
                         weights_dma_start <= 1;
                         dma_done_r <= 0;
                         dma_w_done_r <= 0;
-		        state <= S_DMA_FM;
+		        tile_manager_state <= S_DMA_FM;
 	    	    end
 		end
                 
@@ -346,7 +354,7 @@ module tile_manager #(
 			dma_w_done_r <= 1;
 		    end
                     if (dma_done_r && dma_w_done_r) begin
-                        state <= S_ACC_START;
+                        tile_manager_state <= S_ACC_START;
                     end
                 end
                 
@@ -355,7 +363,7 @@ module tile_manager #(
                     acc_start <= 1;
                     stream_ptr <= 0;
 		    out_ptr <= 0;
-                    state <= S_ACC_STREAM;
+                    tile_manager_state <= S_ACC_STREAM;
                 end
                 
                 // 3. Stream Data from URAM to Accelerator
@@ -363,7 +371,7 @@ module tile_manager #(
                     // Simple Valid/Ready Handshake
                     // We assume URAM read is 0-latency (Register file behavior for sim)
                     // In real HW, need 1-cycle read latency handling
-                    if (stream_ptr < (TILE_HEIGHT + 2) * full_img_width_strips) begin
+                    if (stream_ptr < (active_height + 2) * full_img_width_strips) begin
                         acc_din_valid <= 1;
                         acc_din_data <= uram_input[stream_ptr];
                         
@@ -372,14 +380,14 @@ module tile_manager #(
                         end
                     end else begin
                         acc_din_valid <= 0;
-                        state <= S_ACC_WAIT;
+                        tile_manager_state <= S_ACC_WAIT;
                     end
                 end
                 
                 // 4. Wait for Accelerator to Finish
                 S_ACC_WAIT: begin
                     if (acc_done) begin
-                        state <= S_NEXT_TILE;
+                        tile_manager_state <= S_NEXT_TILE;
                     end
                 end
                 
@@ -391,29 +399,26 @@ module tile_manager #(
 		    if (current_tile_ic + 1 >= num_tiles_ic) begin
 			output_dma_start <= 1;      // Trigger Output DMA
 			current_tile_ic <= 0;
-			state <= S_WRITE_OUTPUT;
+			tile_manager_state <= S_WRITE_OUTPUT;
 		    end else begin
 			current_tile_ic <= current_tile_ic + 1;
-			// dma_start <= 1;
-			// weights_dma_start <= 1;
-			// state <= S_DMA_FM;
 			if (is_sparse) begin
-			    state <= S_CHECK_IC_MASK;
+			    tile_manager_state <= S_CHECK_IC_MASK;
 			end else begin
 			    dma_start <= 1;
 			    weights_dma_start <= 1;
-			    state <= S_DMA_FM;
+			    tile_manager_state <= S_DMA_FM;
 			end
 		    end
                 end
 
 		S_CHECK_IC_MASK: begin
 		    if (ic_tile_mask[current_tile_ic] == 1'b0) begin
-			state <= S_NEXT_TILE;
+			tile_manager_state <= S_NEXT_TILE;
 		    end else begin
 			dma_start <= 1;
 			weights_dma_start <= 1;
-			state <= S_DMA_FM;
+			tile_manager_state <= S_DMA_FM;
 		    end
 		end
 
@@ -429,25 +434,22 @@ module tile_manager #(
                                 done <= 1;
 			        dma_start <= 0;
 			        weights_dma_start <= 0;
-                                state <= S_IDLE;
+                                tile_manager_state <= S_IDLE;
 			    end else begin
 				current_tile_y <= current_tile_y + 1;
 				current_tile_oc <= 0;
 				current_tile_ic <= 0;
-				state <= S_INIT_URAM;
+				tile_manager_state <= S_INIT_URAM;
 			    end
                         end else begin
                             current_tile_oc <= current_tile_oc + 1;
 			    current_tile_ic <= 0;
-                            // dma_start <= 1;
-			    // weights_dma_start <= 1;
-                            // state <= S_DMA_FM;
 			    if (is_sparse) begin
-			        state <= S_CHECK_OC_MASK;
+			        tile_manager_state <= S_CHECK_OC_MASK;
 			    end else begin
 				dma_start <= 1;
 				weights_dma_start <= 1;
-				state <= S_DMA_FM;
+				tile_manager_state <= S_DMA_FM;
 			    end
                         end
                     end
@@ -463,19 +465,19 @@ module tile_manager #(
 				done <= 1;
 				dma_start <= 0;
 				weights_dma_start <= 0;
-				state <= S_IDLE;
+				tile_manager_state <= S_IDLE;
 			    end else begin
 				current_tile_y <= current_tile_y + 1;
 				current_tile_oc <= 0;
 				current_tile_ic <= 0;
-				state <= S_INIT_URAM;
+				tile_manager_state <= S_INIT_URAM;
 			    end
 			end else begin
 			    current_tile_oc <= current_tile_oc + 1;
-			    state <= S_CHECK_OC_MASK;
+			    tile_manager_state <= S_CHECK_OC_MASK;
 		        end
 		    end else begin
-			state <= S_CHECK_IC_MASK;
+			tile_manager_state <= S_CHECK_IC_MASK;
 		    end
 		end
             endcase
@@ -496,7 +498,7 @@ module tile_manager #(
     
     initial begin
 
-	wait(state == S_ACC_START);
+	wait(tile_manager_state == S_ACC_START);
         #1;
         
         $display("[SIM-DEBUG] Dumping Input URAM Content...");
@@ -510,8 +512,8 @@ module tile_manager #(
         $fclose(f_dump);
 	
         // Wait until the controller signals that loading is finished
-        // You might need to pass 'load_done' into this module or trigger on a state
-        wait(state == S_ACC_START && current_tile_y == 0 && current_tile_ic == 0);
+        // You might need to pass 'load_done' into this module or trigger on a tile_manager_state
+        wait(tile_manager_state == S_ACC_START && current_tile_y == 0 && current_tile_ic == 0);
         
         // Wait a few cycles for stability
         #2;

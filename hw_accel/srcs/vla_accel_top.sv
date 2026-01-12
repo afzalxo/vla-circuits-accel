@@ -355,6 +355,7 @@ module vla_accel_top #(
 	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
+	.is_conv(is_conv),
 	.log2_mem_tile_height(log2_mem_tile_height),
 	.is_sparse(is_sparse),
 	.ic_tile_mask(ic_tile_mask),

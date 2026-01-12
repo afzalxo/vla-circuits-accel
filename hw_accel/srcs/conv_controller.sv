@@ -18,13 +18,13 @@ module conv_controller #(
     input wire [15:0] num_ic_tiles,
     output reg weight_req,
     input wire weight_ack,
-    output reg uram_replay,
     
     output reg lb_shift_en,
     output reg seq_load,
     output reg [1:0] k_x,
     output reg [1:0] k_y,
     input wire [1:0] stride,
+    input wire is_conv,
     output reg cu_en,
     output reg cu_clear,
     
@@ -49,9 +49,6 @@ module conv_controller #(
     localparam S_SWITCH_IC   = 11;
     localparam S_SKIP_COMPUTE = 12;
 
-    wire is_valid_range = (row_idx < img_height - 2);
-    wire is_stride_match = ((row_idx) % stride == 0);
-
     reg [3:0] state;
     reg [3:0] kernel_step;
     reg [15:0] load_col_cnt;
@@ -75,7 +72,6 @@ module conv_controller #(
             kernel_step <= 0;
             pipe_flush_cnt <= 0;
 	    weight_req <= 0;
-	    uram_replay <= 0;
 
         end else begin
             // Default Pulses
@@ -136,7 +132,7 @@ module conv_controller #(
 
                         // If image is only 1 strip wide, we are ready. Else load 2nd strip.
                         if (img_width_strips == 1) state <= S_COMPUTE;
-                        else state <= SEQ_LOAD_0;// S_PRIME_SEQ_2;
+                        else state <= SEQ_LOAD_0;
                     end
                 end
 
@@ -174,27 +170,38 @@ module conv_controller #(
 
                 // --- 4. COMPUTE ---
                 S_COMPUTE: begin
-                    if (kernel_step < 9) begin
-                        cu_en <= 1;
-			// Clear CU only at first kernel step of first IC tile
-			if (kernel_step == 0) cu_clear <= 1;
-			else cu_clear <= 0;
-
-                        k_y <= kernel_step / 3;
-                        k_x <= kernel_step % 3;
-                        kernel_step <= kernel_step + 1;
-                    end else begin
-			k_y <= 0;
-			k_x <= 0;
+		    if (!is_conv) begin
+			cu_en <= 1;
+			cu_clear <= 1;
 			kernel_step <= 0;
-                        cu_en <= 0;
-                        pipe_flush_cnt <= 0;
-                        state <= S_WAIT;
-                    end
+			k_x <= 1;
+			k_y <= 1;
+			state <= S_WAIT;
+		    end else begin
+                        if (kernel_step < 9) begin
+                            cu_en <= 1;
+		            // Clear CU only at first kernel step of first IC tile
+		            if (kernel_step == 0) cu_clear <= 1;
+		            else cu_clear <= 0;
+
+			    k_x <= kernel_step % 3;
+			    k_y <= kernel_step / 3;
+                            kernel_step <= kernel_step + 1;
+                        end else begin
+			    k_x <= 0;
+			    k_y <= 0;
+		            kernel_step <= 0;
+                            cu_en <= 0;
+                            pipe_flush_cnt <= 0;
+                            state <= S_WAIT;
+                        end
+	    	    end
                 end
                 
                 // --- 5. WAIT & UPDATE ---
                 S_WAIT: begin
+		    cu_en <= 0;
+		    cu_clear <= 0;
                     if (pipe_flush_cnt == 5) begin
                             dout_valid <= 1;
                             // Update Output Coordinate
@@ -246,9 +253,6 @@ module conv_controller #(
 			        kernel_step <= 0;
 				state <= S_COMPUTE;
 		 	    end else begin	
-                                // cu_clear <= 1;
-                                // kernel_step <= 0;
-                                // state <= S_COMPUTE;
 			        state <= S_SKIP_COMPUTE;
 		            end
                         end
@@ -289,9 +293,6 @@ module conv_controller #(
 		        end else begin
 		    	    load_col_cnt <= load_col_cnt + 1;
 		        end
-		        // cu_clear <= 1;
-		        // kernel_step <= 0;
-		        // state <= S_COMPUTE;
 			if (row_idx < img_height - 2 && row_idx % stride == 0) begin
                             cu_clear <= 1;
                             kernel_step <= 0;
