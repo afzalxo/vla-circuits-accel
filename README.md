@@ -68,3 +68,7 @@ Added support for GEMM for dense layers. Moving towards end-to-end verification.
 ## 12 Jan (Model + Dataset)
 
 Added dataset collection script for carla, and model+training script for carla dense lasso model.
+
+## 18 Jan (Hw Accel)
+
+End-to-end hardware verification of new VGG-style model on Carla dataset with 128 x 128 image inputs. Tested and functional verification done for input images obtained from the dataset, and weights obtained from the saved model pth. So far, only the vision modality is being processed on the hardware. 

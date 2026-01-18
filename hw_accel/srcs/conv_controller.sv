@@ -48,12 +48,17 @@ module conv_controller #(
     localparam S_DONE        = 7;
     localparam S_SWITCH_IC   = 11;
     localparam S_SKIP_COMPUTE = 12;
+    localparam S_FETCH_WAIT  = 13;
+    localparam S_FETCH_PULSE_2 = 14;
 
     reg [3:0] state;
     reg [3:0] kernel_step;
     reg [15:0] load_col_cnt;
     reg [15:0] load_row_cnt;
     reg [3:0] pipe_flush_cnt;
+
+    // assign k_x = (!is_conv) ? 2'd1 : (kernel_step % 3);
+    // assign k_y = (!is_conv) ? 2'd1 : (kernel_step / 3);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -131,14 +136,18 @@ module conv_controller #(
                         end
 
                         // If image is only 1 strip wide, we are ready. Else load 2nd strip.
-                        if (img_width_strips == 1) state <= S_COMPUTE;
+                        if (img_width_strips == 1) state <= SEQ_LOAD_0;  // S_COMPUTE;
                         else state <= SEQ_LOAD_0;
                     end
                 end
 
 		SEQ_LOAD_0: begin
 		    seq_load <= 1;
-		    state <= S_PRIME_SEQ_2;
+		    if (img_width_strips == 1) begin
+			state <= SEQ_LOAD_1;
+		    end else begin
+		        state <= S_PRIME_SEQ_2;
+		    end
 		end
 
                 // --- 3. PRIME HORIZONTAL 2 (Row 1, Strip 1) ---
@@ -238,7 +247,7 @@ module conv_controller #(
                         din_ready <= 1;
 			lb_shift_en <= 1;
                         if (din_valid && din_ready) begin
-                            seq_load <= 1;
+                            // seq_load <= 1;
                             din_ready <= 0;
 			    lb_shift_en <= 0;
                             
@@ -248,6 +257,7 @@ module conv_controller #(
                             end else begin
                                 load_col_cnt <= load_col_cnt + 1;
                             end
+			    /*
                             if (row_idx < img_height - 2 && row_idx % stride == 0) begin  // Only compute for valid data
 				cu_clear <= 1;
 			        kernel_step <= 0;
@@ -255,9 +265,42 @@ module conv_controller #(
 		 	    end else begin	
 			        state <= S_SKIP_COMPUTE;
 		            end
+			    */
+			    state <= S_FETCH_WAIT;
                         end
                     end
                 end
+
+		S_FETCH_WAIT: begin
+		    seq_load <= 1; // Pulse 1: LB -> Next
+                    
+                    if (img_width_strips == 1) begin
+                        // Single Strip: Need 2nd pulse to move Next -> Curr
+                        state <= S_FETCH_PULSE_2;
+                    end else begin
+                        // Multi Strip: Pipeline is fine
+                        if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+                            cu_clear <= 1;
+                            kernel_step <= 0;
+                            state <= S_COMPUTE;
+                        end else begin
+                            state <= S_SKIP_COMPUTE;
+                        end
+                    end
+		end
+
+		S_FETCH_PULSE_2: begin
+                    seq_load <= 1; // Pulse 2: Next -> Curr
+                    
+                    if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+                        cu_clear <= 1;
+                        kernel_step <= 0;
+                        state <= S_COMPUTE;
+                    end else begin
+                        state <= S_SKIP_COMPUTE;
+                    end
+                end
+
 
 		S_SKIP_COMPUTE: begin
                     // Mimics S_WAIT but without waiting for pipeline flush
@@ -293,6 +336,7 @@ module conv_controller #(
 		        end else begin
 		    	    load_col_cnt <= load_col_cnt + 1;
 		        end
+			/*
 			if (row_idx < img_height - 2 && row_idx % stride == 0) begin
                             cu_clear <= 1;
                             kernel_step <= 0;
@@ -300,6 +344,17 @@ module conv_controller #(
                         end else begin
                             state <= S_SKIP_COMPUTE;
                         end
+			*/
+			if (img_width_strips == 1) state <= S_FETCH_PULSE_2;
+			else begin
+			    if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+                                cu_clear <= 1;
+                                kernel_step <= 0;
+                                state <= S_COMPUTE;
+                            end else begin
+                                state <= S_SKIP_COMPUTE;
+                            end
+			end
 		    end
 		end
 

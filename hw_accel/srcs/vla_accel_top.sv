@@ -290,6 +290,7 @@ module vla_accel_top #(
     wire is_sparse;
     wire [31:0] ic_tile_mask;
     wire [31:0] oc_tile_mask;
+    wire flatten;
 
     instruction_scheduler #(
 	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -324,6 +325,7 @@ module vla_accel_top #(
 	.cfg_is_conv(is_conv),
 	.cfg_relu_en(relu_en),
 	.cfg_stride(stride),
+	.cfg_flatten(flatten),
 	.cfg_log2_mem_tile_height(log2_mem_tile_height),
 	.cfg_is_sparse(is_sparse),
 	.cfg_ic_tile_mask(ic_tile_mask),
@@ -331,6 +333,8 @@ module vla_accel_top #(
 	.cfg_input_bank(cfg_input_bank),
 	.cfg_output_bank(cfg_output_bank)
     );
+
+    wire [15:0] img_width_strips = (img_width < PP_PAR) ? 1 : (img_width + PP_PAR - 1) / PP_PAR;
 
     tile_manager #(
 	.IC_PAR(IC_PAR),
@@ -345,7 +349,7 @@ module vla_accel_top #(
 	.rst_n(ap_rst_n),
 	.start(tm_start),
 
-	.full_img_width_strips(img_width / PP_PAR),
+	.full_img_width_strips(img_width_strips),
 	.full_img_height(img_height),
 	.full_img_channels(img_channels),
 	.output_channels(out_channels),
@@ -355,6 +359,7 @@ module vla_accel_top #(
 	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
+	.flatten(flatten),
 	.is_conv(is_conv),
 	.log2_mem_tile_height(log2_mem_tile_height),
 	.is_sparse(is_sparse),

@@ -53,14 +53,12 @@ struct alignas(64) NISA_Instruction {
     uint8_t  relu_en;          // [287:280]
     uint8_t  stride;           // [295:288]
     uint8_t  log2_mem_tile_height;  // [303:296]
-    uint8_t  is_sparse;             // [311:304]
-    // Compiler inserts implicit padding 8-bit here     // [319:312]
+    uint8_t  flatten;               // [311:304]
+    uint8_t  is_sparse;             // [319:312]
     uint32_t ic_tile_mask;          // [351:320]
     uint32_t oc_tile_mask;          // [383:352]
     uint8_t  padding[16];           // [511:384] - Padding to make 64 bytes
 };
-
-// --- HELPER FUNCTIONS ---
 
 void load_bin(const std::string& filename, std::vector<uint8_t>& buffer) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -78,7 +76,6 @@ void load_bin(const std::string& filename, std::vector<uint8_t>& buffer) {
 template <typename T>
 void pack_feature_map(const T* input, T* output, int H, int W, int C, int H_tile, int IC_PAR_HW) {
     int num_h_tiles = H / H_tile;
-    int num_pp_tiles = (W + PP_PAR - 1) / PP_PAR;
     int num_c_slots = (C + IC_PAR_HW - 1) / IC_PAR_HW;
     int out_idx = 0;
 
@@ -86,30 +83,23 @@ void pack_feature_map(const T* input, T* output, int H, int W, int C, int H_tile
         for (int cs = 0; cs < num_c_slots; ++cs) {
             for (int h_loc = 0; h_loc < H_tile; ++h_loc) {
                 int h_abs = (ht * H_tile) + h_loc;
-		for (int pp_tile = 0; pp_tile < num_pp_tiles; ++pp_tile) {
-                for (int w = 0; w < PP_PAR; ++w) {
+                for (int w = 0; w < W; ++w) {
                     for (int c_loc = 0; c_loc < IC_PAR_HW; ++c_loc) {
                         int c_abs = (cs * IC_PAR_HW) + c_loc;
                         if (c_abs >= C) {
                             output[out_idx++] = 0; // Padding
                         } else {
                             // Planar Input [C][H][W]
-			    if ((pp_tile * PP_PAR + w) >= W) {
-				output[out_idx++] = 0; // Padding
-			    } else {
-                                int in_idx = (c_abs * H * W) + (h_abs * W) + (pp_tile * PP_PAR + w);
-                                output[out_idx++] = input[in_idx];
-			    }
+                            int in_idx = (c_abs * H * W) + (h_abs * W) + w;
+                            output[out_idx++] = input[in_idx];
                         }
                     }
                 }
-		}
             }
         }
     }
 }
 
-// Pack Weights (Host -> Hardware Layout)
 template <typename T>
 void pack_weights(const T* src, T* dst, int OC, int IC, int OC_PAR_HW, int IC_PAR_HW, bool is_1x1) {
     int num_ic_tiles = (IC + IC_PAR_HW - 1) / IC_PAR_HW;
@@ -148,7 +138,7 @@ void pack_weights(const T* src, T* dst, int OC, int IC, int OC_PAR_HW, int IC_PA
 
 // Verification Function
 int verify_output(const std::vector<int8_t>& hw_output, const std::string& golden_file, 
-                  int H, int W, int C, int stride) {
+                  int H, int W, int C, int stride, int flatten) {
     
     std::vector<uint8_t> file_golden_raw;
     load_bin(golden_file, file_golden_raw);
@@ -173,8 +163,9 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
 	int rows_remaining = H - (ht * TILE_HEIGHT);
 	int active_tile_h_in = (rows_remaining < TILE_HEIGHT) ? rows_remaining : TILE_HEIGHT;
 	int active_tile_h_out = active_tile_h_in / stride;
+	int num_oc_tiles = (C + OC_PAR - 1) / OC_PAR;
 
-        for (int ot = 0; ot < C / OC_PAR; ++ot) {
+        for (int ot = 0; ot < num_oc_tiles; ++ot) {
             for (int r = 0; r < active_tile_h_out; ++r) {
                 for (int w_strip = 0; w_strip < num_w_strips; ++w_strip) {
                     for (int p = 0; p < eff_pp_par; ++p) {
@@ -184,7 +175,7 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
                             int global_w = (w_strip * eff_pp_par) + p;
                             int global_oc = (ot * OC_PAR) + o;
 
-			    bool is_padding = (global_w >= out_w);
+			    bool is_padding = (global_w >= out_w) || (global_oc >= C);
 
 			    if (!is_padding) {
                                 // Planar Index for Golden
@@ -193,14 +184,16 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
 				if (gold_idx < golden.size()) {
                                 int8_t exp = golden[gold_idx];
                                 int8_t got = hw_output[linear_idx];
-			        // std::cout << "Idx[" << linear_idx << "] H=" << global_h << " W=" << global_w << " C=" << global_oc << " Exp=" << (int)exp << " Got=" << (int)got << std::endl;
+			        std::cout << "Idx[" << linear_idx << "] H=" << global_h << " W=" << global_w << " C=" << global_oc << " Exp=" << (int)exp << " Got=" << (int)got << std::endl;
                                 int diff = std::abs((int)got - (int)exp);
                                 if (diff > 1) {
+				    /*
                                     if (errors < 50) {
                                         std::cout << "Mismatch [H=" << global_h << " W=" << global_w << " C=" << global_oc 
                                                   << "] Exp: " << (int)exp << " Got: " << (int)got 
                                                   << " (Diff: " << diff << ")" << std::endl;
                                     }
+				    */
                                     errors++;
 			            if (diff > max_diff) {
 			                max_diff = diff;
@@ -209,6 +202,11 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
 				}
 			    }
                             linear_idx++;
+                        }
+			if (flatten) {
+                            // We just read 16 bytes. The hardware wrote 64 bytes.
+                            // Skip the 48 bytes of padding to get to the next pixel.
+                            linear_idx += 112;
                         }
                     }
                 }
@@ -221,51 +219,119 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
     return errors;
 }
 
+
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <XCLBIN File>" << std::endl;
         return EXIT_FAILURE;
     }
 
-    bool is_1x1 = true;
     // Network topology here:
     std::vector<LayerConfig> layers;
 
+    /*
+    layers.push_back({
+	"Layer 0",
+	8, 8, 64, 64,
+	1, 9, true,
+	"fpga_data_debug/weights_layer_debug.bin",
+	"fpga_data_debug/golden_output_tiled.bin"
+    });
+
+    layers.push_back({
+	"Dense 1",
+	1, 1, 4096, 512,
+	1, 8, true,
+	"fpga_data_debug/weights_dense_debug.bin",
+	"fpga_data_debug/golden_output_dense.bin"
+    });
+
+    layers.push_back({
+	"Dense 2",
+	1, 1, 512, 256,
+	1, 7, true,
+	"fpga_data_debug/weights_dense1_debug.bin",
+	"fpga_data_debug/golden_output_dense1.bin"
+    });
+    */
     // Layer 0
     layers.push_back({
         "Layer 0",
-        1, 1, 4096, 512,   // InW, InH, InC, OutC
-        1, 12, false,       // Stride, Shift, ReLU
-        "fpga_data_gemm/weights_layer0.bin",
-        "fpga_data_gemm/golden_output_layer0.bin"
+        128, 128, 12, 64,   // InW, InH, InC, OutC
+        2, 13, true,       // Stride, Shift, ReLU
+        "fpga_data_carla/weights_conv0.bin",
+        "fpga_data_carla/golden_output_conv0.bin"
     });
 
-    /*
     // Layer 1
     layers.push_back({
         "Layer 1",
-        32, 32, 32, 64,   // Input dims match L0 output
-        2, 8, true,
-        "fpga_data/weights_layer1.bin",
-        "fpga_data/golden_output_layer1.bin"
+        64, 64, 64, 64,   // Input dims match L0 output
+        2, 9, true,
+        "fpga_data_carla/weights_conv1.bin",
+        "fpga_data_carla/golden_output_conv1.bin"
     });
 
+    // Layer 2
     layers.push_back({
 	"Layer 2",
-	16, 16, 64, 128,
-	2, 7, true,
-	"fpga_data/weights_layer2.bin",
-	"fpga_data/golden_output_layer2.bin"
+	32, 32, 64, 64,
+	2, 9, true,
+	"fpga_data_carla/weights_conv2.bin",
+	"fpga_data_carla/golden_output_conv2.bin"
     });
-    */
+
+    // Layer 3
+    layers.push_back({
+	"Layer 3",
+	16, 16, 64, 64,
+	2, 7, true,
+	"fpga_data_carla/weights_conv3.bin",
+	"fpga_data_carla/golden_output_conv3.bin"
+    });
+
+    // Layer 4
+    layers.push_back({
+	"Layer 4",
+	8, 8, 64, 64,
+	1, 7, true,
+	"fpga_data_carla/weights_conv4.bin",
+	"fpga_data_carla/golden_output_conv4.bin"
+    });
+    // Layer 5 Dense
+    layers.push_back({
+	"Dense 1",
+	1, 1, 4096, 512,
+	1, 9, true,
+	"fpga_data_carla/weights_fc1.bin",
+	"fpga_data_carla/golden_output_fc1.bin"
+    });
+    // Layer 6 Dense
+    layers.push_back({
+	"Dense 2",
+	1, 1, 512, 256,
+	1, 6, true,
+	"fpga_data_carla/weights_fc2.bin",
+	"fpga_data_carla/golden_output_fc2.bin"
+    });
+    // Layer 7 Dense
+    layers.push_back({
+	"Dense 3",
+	1, 1, 256, 3,
+	1, 8, false,
+	"fpga_data_carla/weights_head.bin",
+	"fpga_data_carla/golden_output_head.bin"
+    });
 
     // A. Input Feature Map
     std::vector<uint8_t> raw_input;
-    load_bin("fpga_data_gemm/input_layer0.bin", raw_input);
+    load_bin("fpga_data_carla/input_vision.bin", raw_input);
+    // load_bin("fpga_data_debug/input_layer_debug.bin", raw_input);
     
     // Calculate Heap Size (Instr + Input)
     // Input needs to be padded to IC_PAR
-    size_t l0_input_padded_size = ((layers[0].in_w + PP_PAR - 1) / PP_PAR) * PP_PAR * layers[0].in_h * 
+    size_t l0_input_padded_size = layers[0].in_w * layers[0].in_h * 
                                   ((layers[0].in_c + IC_PAR - 1) / IC_PAR) * IC_PAR;
     size_t heap_size = INSTR_SECTION_SIZE + l0_input_padded_size;
     std::vector<uint8_t, aligned_allocator<uint8_t>> host_heap(heap_size);
@@ -273,13 +339,14 @@ int main(int argc, char **argv) {
     // Pack Input into Heap
     pack_feature_map<uint8_t>(raw_input.data(), host_heap.data() + INSTR_SECTION_SIZE, 
                               layers[0].in_h, layers[0].in_w, layers[0].in_c, 
-                              1, IC_PAR);
+                              TILE_HEIGHT, IC_PAR);
 
     // B. Weights (Stack all layers)
     size_t total_weight_size = 0;
     for (const auto& layer : layers) {
+	bool is_1x1 = (layer.stride == 1 && layer.in_h == 1);
+	uint32_t kernel_size = is_1x1 ? 1 : 9;
         // Align to IC_PAR/OC_PAR
-	uint32_t kernel_size = (is_1x1) ? 1 : 9;
         int ic_pad = (layer.in_c + IC_PAR - 1) / IC_PAR * IC_PAR;
         int oc_pad = (layer.out_c + OC_PAR - 1) / OC_PAR * OC_PAR;
         total_weight_size += oc_pad * ic_pad * kernel_size;
@@ -291,11 +358,13 @@ int main(int argc, char **argv) {
     std::vector<size_t> layer_weight_offsets; // Store for instruction gen
 
     for (const auto& layer : layers) {
-	uint32_t kernel_size = (is_1x1) ? 1 : 9;
         std::vector<uint8_t> w_raw;
         load_bin(layer.weight_file, w_raw);
         
         layer_weight_offsets.push_back(current_weight_offset);
+
+	bool is_1x1 = (layer.stride == 1 && layer.in_h == 1);
+	uint32_t kernel_size = is_1x1 ? 1 : 9;
         
         pack_weights<uint8_t>(w_raw.data(), host_weights.data() + current_weight_offset, 
                               layer.out_c, layer.in_c, OC_PAR, IC_PAR, is_1x1);
@@ -340,21 +409,30 @@ int main(int argc, char **argv) {
         instr.height = layer.in_h;
         // Pad Input Channels for Hardware Loop
         instr.in_channels = (layer.in_c + IC_PAR - 1) / IC_PAR * IC_PAR;
-        instr.out_channels = layer.out_c;
+        instr.out_channels = (layer.out_c + OC_PAR - 1) / OC_PAR * OC_PAR;
+
+	bool is_1x1 = (layer.stride == 1 && layer.in_h == 1);
+	bool is_conv = !is_1x1;
 
         // Config
-        // instr.opcode = OP_CONV;
-        instr.opcode = OP_GEMM;
+	if (is_conv) {
+            instr.opcode = OP_CONV;
+            // Memory Layout Logic
+            // If previous layer had stride 2, current input is packed in blocks of TILE_HEIGHT/2
+            // L0 Input is packed by Host at TILE_HEIGHT (log2=2)
+            // L1 Input is L0 Output. If L0 stride=2, L1 Input is packed at TILE_HEIGHT/2 (log2=1)
+            int mem_tile_h = (i == 0) ? TILE_HEIGHT : (TILE_HEIGHT / prev_stride);
+            instr.log2_mem_tile_height = (int)std::log2(mem_tile_h);
+	} else {
+	    instr.opcode = OP_GEMM;
+	    instr.log2_mem_tile_height = 0;
+	}
         instr.quant_shift = layer.quant_shift;
         instr.relu_en = layer.relu ? 1 : 0;
         instr.stride = layer.stride;
 
-        // Memory Layout Logic
-        // If previous layer had stride 2, current input is packed in blocks of TILE_HEIGHT/2
-        // L0 Input is packed by Host at TILE_HEIGHT (log2=2)
-        // L1 Input is L0 Output. If L0 stride=2, L1 Input is packed at TILE_HEIGHT/2 (log2=1)
-        int mem_tile_h = (i == 0) ? TILE_HEIGHT : (TILE_HEIGHT / prev_stride);
-        instr.log2_mem_tile_height = 0; // (int)std::log2(mem_tile_h);
+	instr.flatten = (i == 4) ? 1 : 0;  // Store output of last conv layer as flat
+	// instr.flatten = (i == 0) ? 1 : 0;
 	instr.is_sparse = 0;
 	instr.ic_tile_mask = 0xFFFFFFFF;
 	instr.oc_tile_mask = 0xFFFFFFFF;
@@ -421,17 +499,19 @@ int main(int argc, char **argv) {
     // cl::Buffer* final_buf = &d_buf_b;
     
     auto& last_layer = layers.back();
-    int out_w_padded = ((last_layer.in_w / last_layer.stride + PP_PAR - 1) / PP_PAR) * PP_PAR;
+    int out_w_padded = ((last_layer.in_w / last_layer.stride) + PP_PAR - 1) / PP_PAR * PP_PAR;
+    int out_ch_padded = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR;
     size_t out_bytes = out_w_padded * 
                        (last_layer.in_h / last_layer.stride) * 
-                       last_layer.out_c;
+                       out_ch_padded;
+    // out_bytes *= PP_PAR;
     
     std::vector<int8_t> hw_results(out_bytes);
     q.enqueueReadBuffer(*final_buf, CL_TRUE, 0, out_bytes, hw_results.data());
 
     int errors = verify_output(hw_results, last_layer.golden_file, 
                                last_layer.in_h, last_layer.in_w, last_layer.out_c, 
-                               last_layer.stride);
+                               last_layer.stride, 0);
 
     if (errors == 0) std::cout << "TEST PASSED!" << std::endl;
     else std::cout << "TEST FAILED with " << errors << " errors." << std::endl;

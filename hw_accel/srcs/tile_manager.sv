@@ -27,6 +27,7 @@ module tile_manager #(
     input wire [4:0] quant_shift,
     input wire relu_en,
     input wire [1:0] stride,
+    input wire flatten,
     input wire is_conv,
     input wire [2:0] log2_mem_tile_height,
     input wire is_sparse,
@@ -147,6 +148,25 @@ module tile_manager #(
         .uram_wen(dma_wen),
         .done(dma_done)
     );
+
+    /*
+    flatten_unit #(
+	.DATA_WIDTH(DATA_WIDTH),
+	.CHANNELS_PAR(OC_PAR),
+	.PP_PAR(PP_PAR),
+	.HBM_DATA_WIDTH(GMEM_DATA_WIDTH),
+	.ADDR_WIDTH(64),
+	.TILE_HEIGHT(TILE_HEIGHT)
+    ) flatten_unit_inst (
+	.clk(clk), .rst_n(rst_n),
+	.start(start_flatten),
+	.src_addr_base(hbm_addr_src),
+	.dst_addr_base(hbm_addr_dst),
+	.img_width(full_img_width_strips * PP_PAR),
+	.img_height(full_img_height),
+	.img_channels(output_channels),
+	    )
+    */
     
     weights_dma #(
         .IC_PAR(IC_PAR),
@@ -188,6 +208,7 @@ module tile_manager #(
 	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
+	.flatten(flatten),
 	.write_count(fmap_out_words),
 	.uram_addr(dma_uram_fmap_out_addr),
 	.uram_rdata(dma_fmap_out_wdata),
@@ -251,8 +272,6 @@ module tile_manager #(
     localparam S_WRITE_OUTPUT = 8;
  
     integer p, o;
-    reg [15:0] acc_out_row_cnt;
-    reg [15:0] acc_out_col_cnt;
     // --- URAM WRITE LOGIC (Accelerator -> Output URAM) ---
     // We simply append results linearly
     always @(posedge clk or negedge rst_n) begin
@@ -260,38 +279,26 @@ module tile_manager #(
             out_ptr <= 0;
 	end else if (tile_manager_state == S_ACC_START) begin
 	    out_ptr <= 0;
-	    acc_out_row_cnt <= 0;
-            acc_out_col_cnt <= 0;
         end else if (acc_dout_valid) begin
-	    // if (acc_out_row_cnt >= 1 && acc_out_row_cnt <= TILE_HEIGHT) begin
-	        for (p = 0; p < PP_PAR; p = p + 1) begin
-	            if (p % stride == 0) begin
-	                integer p_out = p / stride;
-	                for (o = 0; o < OC_PAR; o = o + 1) begin
-	            	integer dst_bit = (p_out * OC_PAR + o) * ACC_WIDTH;
-	            	if (current_tile_ic == 0) begin
-	            	    // First Pass: Overwrite
-	            	    uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= acc_dout_data[p][o];
-	            	end else begin
-	            	    // Accumulation Pass: Read-Modify-Write
-	            	    // Note: We read from the PACKED location (dst_bit)
-	            	    uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= 
-	            		$signed(uram_output[out_ptr][dst_bit +: ACC_WIDTH]) + 
-	            		$signed(acc_dout_data[p][o]);
-	            	end
-	                end
-	            end
+	    for (p = 0; p < PP_PAR; p = p + 1) begin
+	        if (p % stride == 0) begin
+	    	    integer p_out = p / stride;
+	    	    for (o = 0; o < OC_PAR; o = o + 1) begin
+	    	        integer dst_bit = (p_out * OC_PAR + o) * ACC_WIDTH;
+	    	        if (current_tile_ic == 0) begin
+	    	            // First Pass: Overwrite
+	    	            uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= acc_dout_data[p][o];
+	    	        end else begin
+	    	            // Accumulation Pass: Read-Modify-Write
+	    	            // Note: We read from the PACKED location (dst_bit)
+	    	            uram_output[out_ptr][dst_bit +: ACC_WIDTH] <= 
+	    	        	$signed(uram_output[out_ptr][dst_bit +: ACC_WIDTH]) + 
+	    	        	$signed(acc_dout_data[p][o]);
+	    	        end
+	    	    end
 	        end
-                out_ptr <= out_ptr + 1;
-	    // end
-
-	    if (acc_out_col_cnt == full_img_width_strips - 1) begin
-                acc_out_col_cnt <= 0;
-                acc_out_row_cnt <= acc_out_row_cnt + 1;
-            end else begin
-                acc_out_col_cnt <= acc_out_col_cnt + 1;
-            end
- 
+	    end
+	    out_ptr <= out_ptr + 1;
         end
     end
    

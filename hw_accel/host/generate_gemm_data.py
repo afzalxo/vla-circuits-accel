@@ -5,9 +5,9 @@ import os
 
 # --- CONFIGURATION ---
 OUTPUT_DIR = "fpga_data_gemm"
-M = 128  # Batch Size / Sequence Length (Mapped to Width)
-K = 64  # Input Features (Mapped to In Channels)
-N = 128  # Output Features (Mapped to Out Channels)
+M = 1  # Batch Size / Sequence Length (Mapped to Width)
+K = 4096  # Input Features (Mapped to In Channels)
+N = 512  # Output Features (Mapped to Out Channels)
 
 # Hardware Parameters
 IC_PAR = 16
@@ -65,10 +65,10 @@ def generate_gemm():
     
     # Input: Save as Planar [C, H, W] -> [K, 1, M]
     # Your C++ pack_feature_map expects this layout.
-    print("Feature map first 10 rows:")
-    print(input_t[0, :, 0, 0:10].transpose(1, 0))
-    print("Weights first 10 columns:")
-    print(weights_t[0:17, :, 0, 0])
+    # print("Feature map first 10 rows:")
+    # print(input_t[0, :, 0, 0:10].transpose(1, 0))
+    # print("Weights first 10 columns:")
+    # print(weights_t[0:17, :, 0, 0])
     save_binary(input_t.byte().numpy(), "input_layer0.bin")
     
     # Weights: Save as [OC, IC, 1, 1] -> [N, K]

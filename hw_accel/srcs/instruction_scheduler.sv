@@ -41,6 +41,7 @@ module instruction_scheduler #(
     output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
     output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_stride,
+    output reg 	      cfg_flatten,
     output reg [2:0]  cfg_log2_mem_tile_height,
     output reg        cfg_is_sparse,
     output reg [31:0] cfg_ic_tile_mask,
@@ -102,6 +103,7 @@ module instruction_scheduler #(
 	    cfg_input_bank <= 0;
 	    cfg_output_bank <= 0;
 	    cfg_stride <= 2'b01;
+	    cfg_flatten <= 0;
         end else begin
             // Default Pulses
             tm_start <= 0;
@@ -170,7 +172,8 @@ module instruction_scheduler #(
 		    cfg_relu_en     	 <= instr_reg[280];
 		    cfg_stride      	 <= instr_reg[289:288];
 		    cfg_log2_mem_tile_height <= instr_reg[298:296];
-		    cfg_is_sparse   	 <= instr_reg[304];
+		    cfg_flatten          <= instr_reg[304];
+		    cfg_is_sparse   	 <= instr_reg[312];
 		    cfg_ic_tile_mask     <= instr_reg[351:320];
 		    cfg_oc_tile_mask     <= instr_reg[383:352];
 

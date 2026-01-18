@@ -73,7 +73,7 @@ os.makedirs(temp_dir, exist_ok=True)
 
 gcc = "g++"
 
-host_srcs = [os.path.join(xf_proj_root, "main.cpp"), os.path.join(xf_proj_root, "xcl2.cpp")]
+host_srcs = [os.path.join(xf_proj_root, "main_carla.cpp"), os.path.join(xf_proj_root, "xcl2.cpp")]
 
 cxxflags += " -fmessage-length=0 -I{0}/include -I{1}/include -std=c++14 -O3 -Wall -Wno-unknown-pragmas -Wno-unused-label".format(xilinx_xrt, xilinx_hls)
 cxxflags += " -I {0} -O3".format(xf_proj_root)

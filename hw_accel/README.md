@@ -151,7 +151,11 @@ I evaluated the N-ISA accelerator on a 3-layer VLA CNN workload (from our origin
 
 - [x]   **GEMM Operation:** Implemented GEMM using 1x1 Conv, where for GEMM of dims M x K times K x N, the input feature map is of size H = 1, W = M, IC = K, OC = N. Verified functional correctness. **Update 12th Jan: GEMM operation added. Use main_test1x1.cpp to test. Use `OP_GEMM` for opcode in instruction packet. Verified for various sizes.**
 
-- [ ]   **End-to-End Model Testing:** Integrate the entire VLA model inference pipeline (multiple conv layers + dense layers). Testing VGG-style model with CARLA dataset. **Ongoing**
+- [x]   **End-to-End Model Testing:** Integrate the entire VLA model inference pipeline (multiple conv layers + dense layers). Testing VGG-style model with CARLA dataset. **Update 18th Jan: Fixed and verified a VGG style model with 5 conv layers and 3 dense layers. Input size is 128 x 128, outputs are 3 units of int8 values corresponding to throttle, steering, and brake values. The main issue with making this work was the interface between the last conv layer and the first dense layer: conv layer generataes the output thats not amenable with what the dense layers expect as input. So I added a `flatten` mode the conv layer, which performs a memory layout transformation when writing the output to the memory, so when the first dense layer reads the data from the memory, it 'thinks' it came from a previous dense layer.**
+
+- [ ]   **Language and Prev Output Modalities:** Figure out what to do about the language and previous output modalities. Currently, the hardware only processes image inputs. For now, I am getting the embeddings for these modalities from host processing. I think the prev action modality is easy to handle since I have the dense accelerator already functional. Need to figure out what to do about `nn.EmbeddingBag` on hardware.
+
+- [ ]   **On-board Implementation and Testing:** So far, I have done hardware emulation on AMD Alveo U50. This is pretty close to on-board testing. Just need to go the last mile of synthesizing the design, generating the bitstream, and running on-board tests. 
 
 - [x]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment. **Update 12th Jan: Dataset collected. Need to test whether its suitable since we are binning throttle, brake, and steering values into discrete classes.**
 
