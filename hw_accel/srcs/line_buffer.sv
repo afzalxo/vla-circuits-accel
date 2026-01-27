@@ -25,8 +25,8 @@ module line_buffer #(
     (* ram_style = "ultra" *)
     reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] ram_1 [0:RAM_DEPTH-1];
     
-    reg [15:0] wr_ptr;
-    reg [15:0] rd_ptr;
+    (* max_fanout = 20 *) reg [15:0] wr_ptr;
+    (* max_fanout = 20 *) reg [15:0] rd_ptr;
 
     // --- OUTPUT REGISTERS ---
     // These hold the 3x3 window data stable for the Sequencer
@@ -46,6 +46,9 @@ module line_buffer #(
             ram_1[i] = 0;
         end
     end
+
+    (* max_fanout = 20 *) reg local_sync_rst_n;
+    always @(posedge clk) local_sync_rst_n <= rst_n;
 
     // reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] temp_ram_1;
     always @(posedge clk or negedge rst_n) begin
@@ -71,15 +74,17 @@ module line_buffer #(
             // Latch the OLDER data
             r_row_0 <= ram_0[rd_ptr];
 
-            // --- 2. WRITE PHASE (Update History) ---
-            // Write new input to RAM 1 (to become row_1 next time we visit this column)
-            ram_1[wr_ptr] <= data_in;
-            
-            // Move what was in RAM 1 to RAM 0 (to become row_0 next time)
-            // Note: In Verilog non-blocking assignments, ram_1[rd_ptr] on the RHS
-            // refers to the value at the START of the clock cycle (the old value).
-            // So this correctly moves the data down the line.
-            ram_0[wr_ptr] <= ram_1[rd_ptr];
+	    if (local_sync_rst_n) begin
+                // --- 2. WRITE PHASE (Update History) ---
+                // Write new input to RAM 1 (to become row_1 next time we visit this column)
+                ram_1[wr_ptr] <= data_in;
+                
+                // Move what was in RAM 1 to RAM 0 (to become row_0 next time)
+                // Note: In Verilog non-blocking assignments, ram_1[rd_ptr] on the RHS
+                // refers to the value at the START of the clock cycle (the old value).
+                // So this correctly moves the data down the line.
+                ram_0[wr_ptr] <= ram_1[rd_ptr];
+	    end
             
             // --- 3. POINTER UPDATE ---
             if (wr_ptr == img_width_strips - 1) begin

@@ -24,6 +24,7 @@ constexpr size_t INSTR_SECTION_SIZE = 64 * 1024;
 // opcodes
 constexpr uint8_t OP_CONV = 1;
 constexpr uint8_t OP_GEMM = 2;
+constexpr uint8_t OP_MEMCPY = 3;
 constexpr uint8_t OP_HALT = 255;
 
 // User-defined Layer Configuration
@@ -204,9 +205,7 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
                             linear_idx++;
                         }
 			if (flatten) {
-                            // We just read 16 bytes. The hardware wrote 64 bytes.
-                            // Skip the 48 bytes of padding to get to the next pixel.
-                            linear_idx += 112;
+                            linear_idx += (PP_PAR-1) * OC_PAR;
                         }
                     }
                 }
@@ -376,7 +375,7 @@ int main(int argc, char **argv) {
 
     // C. Output Buffers (Max size needed)
     // Just allocate enough for the largest feature map
-    size_t max_fmap_size = 64 * 64 * 64; 
+    size_t max_fmap_size = 128 * 128 * 32; //64 * 64 * 64; 
     std::vector<int8_t, aligned_allocator<int8_t>> host_buf_a(max_fmap_size);
     std::vector<int8_t, aligned_allocator<int8_t>> host_buf_b(max_fmap_size);
 

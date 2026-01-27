@@ -18,21 +18,25 @@ module mac_lane #(
     output reg valid_out
 );
 
-    localparam PIPE_DEPTH = 4;
+    // --- DYNAMIC PIPELINE DEPTH CALCULATION ---
+    // Depth = 1 (Input Reg) + 1 (Product) + log2(IC_PAR) (Adder Tree)
+    // Increased by 1 due to input registering
+    localparam TREE_DEPTH = $clog2(IC_PAR);
+    localparam PIPE_DEPTH = 2 + TREE_DEPTH; 
     
-    reg [PIPE_DEPTH-1:0] valid_pipe;
-    reg [PIPE_DEPTH-1:0] clear_pipe;
+    (* keep = "true" *) reg [PIPE_DEPTH-1:0] valid_pipe;
+    (* keep = "true" *) reg [PIPE_DEPTH-1:0] clear_pipe;
 
-    // --- CONTROL PIPELINE (FIXED) ---
+    // --- CONTROL PIPELINE ---
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             valid_pipe <= 0;
             clear_pipe <= 0;
         end else begin
-            // FIX 1: Valid depends on EN (Data is only valid if enabled)
+            // Shift in new control signals
+            // Note: en controls the input registers, so valid/clear must propagate
+            // We assume valid_in aligns with activations at the input.
             valid_pipe <= {valid_pipe[PIPE_DEPTH-2:0], en ? valid_in : 1'b0};
-            
-            // FIX 2: Clear does NOT depend on EN. It must propagate even if EN=0.
             clear_pipe <= {clear_pipe[PIPE_DEPTH-2:0], clear_acc};
         end
     end
@@ -41,58 +45,81 @@ module mac_lane #(
     wire clear_delayed = clear_pipe[PIPE_DEPTH-1];
     
     // --- DATA PIPELINE ---
-    (* use_dsp = "yes" *) reg signed [15:0] products [0:IC_PAR-1];
-    reg signed [16:0] sum_l1 [0:7];
-    reg signed [17:0] sum_l2 [0:3];
-    reg signed [19:0] dot_product;
-
+    
+    // Stage 0: Input Registers (TIMING FIX)
+    // Breaks the path from Window Sequencer Mux to Multiplier
+    reg signed [DATA_WIDTH-1:0] act_reg [0:IC_PAR-1];
+    reg signed [DATA_WIDTH-1:0] wgt_reg [0:IC_PAR-1];
+    
     integer i;
+    always @(posedge clk) begin
+        if (en) begin
+            for (i=0; i<IC_PAR; i=i+1) begin
+                act_reg[i] <= activations[i];
+                wgt_reg[i] <= weights[i];
+            end
+        end
+        // If !en, hold value (or zero if you prefer, but hold is fine for DSP)
+    end
+
+    // Stage 1: Products
+    // Multiplies the REGISTERED inputs
+    (* use_dsp = "yes" *) reg signed [15:0] products [0:IC_PAR-1];
+    
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             for (i=0; i<IC_PAR; i=i+1) products[i] <= 0;
-            dot_product <= 0;
         end else begin
-            // Data logic remains the same
-            if (en) begin
-                for (i=0; i<IC_PAR; i=i+1) products[i] <= $signed(activations[i]) * $signed(weights[i]);
-            end else begin
-                for (i=0; i<IC_PAR; i=i+1) products[i] <= 0;
+            // Always run multiplier, control logic handles validity downstream
+            // or use 'en' to gate power if needed.
+            // Using 'en' here matches previous logic style.
+            // Note: act_reg is already gated by 'en' above.
+            for (i=0; i<IC_PAR; i=i+1) 
+                products[i] <= $signed(act_reg[i]) * $signed(wgt_reg[i]);
+        end
+    end
+
+    // --- PARAMETERIZED ADDER TREE ---
+    reg signed [ACC_WIDTH-1:0] tree [0:TREE_DEPTH][0:IC_PAR-1];
+
+    // Connect Stage 0 to Products
+    always @(*) begin
+        for (i = 0; i < IC_PAR; i = i + 1) begin
+            tree[0][i] = $signed(products[i]);
+        end
+    end
+
+    // Generate Reduction Stages
+    genvar s, k;
+    generate
+        for (s = 0; s < TREE_DEPTH; s = s + 1) begin : STAGE
+            localparam COUNT = IC_PAR >> (s + 1);
+            for (k = 0; k < COUNT; k = k + 1) begin : ADDER
+                always @(posedge clk or negedge rst_n) begin
+                    if (!rst_n) begin
+                        tree[s+1][k] <= 0;
+                    end else begin
+                        tree[s+1][k] <= tree[s][2*k] + tree[s][2*k+1];
+                    end
+                end
             end
-            
-            // Adder Tree (Always runs, but inputs might be 0)
-            for (i=0; i<8; i=i+1) sum_l1[i] <= $signed(products[2*i]) + $signed(products[2*i+1]);
-            for (i=0; i<4; i=i+1) sum_l2[i] <= $signed(sum_l1[2*i]) + $signed(sum_l1[2*i+1]);
-            dot_product <= ($signed(sum_l2[0]) + $signed(sum_l2[1])) + ($signed(sum_l2[2]) + $signed(sum_l2[3]));
         end
-    end
-    
-    /*
-    always @(posedge clk) begin
-        if (en) begin
-            // Print the first channel of the first pixel
-            $display("MAC Input: Act=%d Weight=%d | Product=%d", 
-                     activations[0], weights[0], activations[0]*weights[0]);
-        end
-    end
-    */
+    endgenerate
+
+    wire signed [ACC_WIDTH-1:0] dot_product = tree[TREE_DEPTH][0];
 
     // --- ACCUMULATOR ---
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             result <= 0;
+            valid_out <= 0;
         end else begin
-	    valid_out <= valid_delayed;
-            // Priority: Clear > Accumulate
+            valid_out <= valid_delayed;
             if (clear_delayed) begin
-                // If clearing, we reset. 
-                // If there is ALSO valid data arriving this exact cycle, we load it.
-                // Otherwise, we reset to 0.
-                result <= (valid_delayed) ? $signed(dot_product) : 0;
+                result <= (valid_delayed) ? dot_product : 0;
             end else if (valid_delayed) begin
-                // Normal accumulation
-                result <= $signed(result) + $signed(dot_product);
+                result <= result + dot_product;
             end
-            // Else: Hold value
         end
     end
 

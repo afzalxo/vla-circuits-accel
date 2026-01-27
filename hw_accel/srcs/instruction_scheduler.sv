@@ -30,16 +30,16 @@ module instruction_scheduler #(
     input wire tm_done,
     
     // --- Configuration Outputs (Driven to Tile Manager) ---
-    output reg [ADDR_WIDTH-1:0] cfg_input_addr,
-    output reg [ADDR_WIDTH-1:0] cfg_output_addr,
-    output reg [ADDR_WIDTH-1:0] cfg_weight_addr,
+    (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_input_addr,
+    (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_output_addr,
+    (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_weight_addr,
     output reg [15:0] cfg_img_width,
     output reg [15:0] cfg_img_height,
     output reg [15:0] cfg_in_channels,
     output reg [15:0] cfg_out_channels,
-    output reg [4:0]  cfg_quant_shift,
+    (* max_fanout = 20 *) output reg [4:0]  cfg_quant_shift,
     output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
-    output reg 	      cfg_relu_en,
+    (* max_fanout = 20 *) output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_stride,
     output reg 	      cfg_flatten,
     output reg [2:0]  cfg_log2_mem_tile_height,
@@ -77,6 +77,7 @@ module instruction_scheduler #(
     // Opcode Definitions
     localparam OP_CONV  = 8'h01;
     localparam OP_GEMM = 8'h02;
+    localparam OP_MEMCPY = 8'h03;
     localparam OP_HALT  = 8'hFF;
 
     always @(posedge clk or negedge rst_n) begin
@@ -192,6 +193,9 @@ module instruction_scheduler #(
 			cfg_img_height <= 16'd1;
 			cfg_stride <= 2'b01;
 			cfg_quant_shift <= instr_reg[268:264];
+			instruction_scheduler_state <= S_EXECUTE;
+		    end else if (opcode == OP_MEMCPY) begin
+			cfg_is_conv <= 0;
 			instruction_scheduler_state <= S_EXECUTE;
 		    end else begin
 			$display("ERROR: Unknown Opcode %h at PC %h", opcode, pc);

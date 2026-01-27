@@ -33,7 +33,7 @@ module tiled_dma #(
     input wire hbm_rvalid,
     
     // URAM Interface (Write Port)
-    output reg [15:0] uram_addr,
+    (* max_fanout = 20 *) output reg [15:0] uram_addr,
     output reg [PP_PAR*IC_PAR*DATA_WIDTH-1:0] uram_wdata,
     output reg uram_wen,
     
@@ -43,14 +43,17 @@ module tiled_dma #(
     localparam BITS_PER_VECTOR = IC_PAR * DATA_WIDTH;
     localparam VECTORS_PER_HBM_WORD = HBM_DATA_WIDTH / BITS_PER_VECTOR;  // 4
 
-    wire [31:0] stride_row_words = img_width / VECTORS_PER_HBM_WORD;  // 8 / 4 = 2
+    // wire [31:0] stride_row_words = img_width / VECTORS_PER_HBM_WORD;  // 8 / 4 = 2
+    reg [31:0] r_stride_row_words;
     
     // Size of one IC Tile Block (contains TILE_HEIGHT rows)
-    wire [31:0] stride_ic_tile_words = stride_row_words << log2_mem_tile_height;
+    // wire [31:0] stride_ic_tile_words = stride_row_words << log2_mem_tile_height;
+    reg [31:0] r_stride_ic_tile_words;
     
     // Size of one Height Tile Block (contains all IC tiles for this height)
     // This is the jump required to go from Height Tile N to Height Tile N+1
-    wire [31:0] stride_height_tile_words = stride_ic_tile_words * (img_channels / IC_PAR);
+    // wire [31:0] stride_height_tile_words = stride_ic_tile_words * (img_channels / IC_PAR);
+    reg [31:0] r_stride_height_tile_words;
 
     // B. Row Iterator Logic
     // -------------------------------------
@@ -67,28 +70,36 @@ module tiled_dma #(
     // -------------------------------------
     // Determine which physical Height Tile block this row belongs to.
     // This handles the Halo case where we read a row from the Next/Prev tile.
-    // wire [15:0] target_height_tile = curr_row / TILE_HEIGHT;
-    // wire [15:0] row_in_tile        = curr_row % TILE_HEIGHT;
-    wire [15:0] target_height_tile = curr_row >>> log2_mem_tile_height;
+    // wire [15:0] target_height_tile = curr_row >>> log2_mem_tile_height;
     wire [15:0] row_mask = (16'd1 << log2_mem_tile_height) - 1;
-    wire [15:0] row_in_tile = curr_row & row_mask;
+    // wire [15:0] row_in_tile = curr_row & row_mask;
+    reg [15:0] r_row_in_tile;
+    reg [15:0] r_target_height_tile;
+
+    reg [63:0] tile_h_offset;
+    reg [63:0] tile_ic_offset;
+    reg [63:0] tile_row_offset;
     
     // Final Base Address for the current row
-    wire [63:0] curr_row_base_addr = (target_height_tile * stride_height_tile_words) + 
-                                     (tile_ic_index      * stride_ic_tile_words) + 
-                                     (row_in_tile        * stride_row_words);
+    // wire [63:0] curr_row_base_addr = (target_height_tile * r_stride_height_tile_words) + 
+    //                                (tile_ic_index      * r_stride_ic_tile_words) + 
+    //                                (row_in_tile        * r_stride_row_words);
+    reg [63:0] r_curr_row_base_addr;
 
-    assign feature_map_words = stride_row_words;
+    assign feature_map_words = r_stride_row_words;
 
 
     // State Machine
     localparam S_IDLE = 0;
-    localparam S_CHECK_BOUNDS = 1;
-    localparam S_READ = 3;
-    localparam S_WAIT = 4;
-    localparam S_DONE = 5;
+    localparam S_CALC_0 = 1;
+    localparam S_CALC_1 = 2;
+    localparam S_CALC_2 = 3;
+    localparam S_CHECK_BOUNDS = 4;
+    localparam S_READ = 5;
+    localparam S_WAIT = 6;
+    localparam S_DONE = 7;
     
-    reg [2:0] tiled_dma_state;
+    reg [3:0] tiled_dma_state;
     reg [15:0] beat_count;
     reg [15:0] req_count;
     reg [7:0] uram_beat_count;
@@ -108,6 +119,10 @@ module tiled_dma #(
 	    uram_beat_count <= 0;
 	    uram_wdata <= 0;
 	    req_count <= 0;
+	    r_stride_ic_tile_words <= 0;
+	    r_stride_height_tile_words <= 0;
+	    r_curr_row_base_addr <= 0;
+	    r_stride_row_words <= 0;
         end else begin
             hbm_ren <= 0;
             uram_wen <= 0;
@@ -119,16 +134,42 @@ module tiled_dma #(
 			curr_row <= abs_start_row;
                         uram_addr <= 0;
 			uram_beat_count <= 0;
-			tiled_dma_state <= S_CHECK_BOUNDS;
+			// tiled_dma_state <= S_CHECK_BOUNDS;
+			tiled_dma_state <= S_CALC_0;
                     end
                 end
+
+		S_CALC_0: begin
+		    r_stride_row_words <= (img_width / VECTORS_PER_HBM_WORD);
+		    r_stride_ic_tile_words <= (img_width / VECTORS_PER_HBM_WORD) << log2_mem_tile_height;
+		    r_stride_height_tile_words <= ((img_width / VECTORS_PER_HBM_WORD) << log2_mem_tile_height) * (img_channels / IC_PAR);
+		    r_target_height_tile <= curr_row >>> log2_mem_tile_height;
+		    r_row_in_tile <= curr_row & row_mask;
+		    tiled_dma_state <= S_CALC_1;
+		end
+
+		S_CALC_1: begin
+		    tile_h_offset <= r_target_height_tile * r_stride_height_tile_words;
+		    tile_ic_offset <= tile_ic_index * r_stride_ic_tile_words;
+		    tile_row_offset <= r_row_in_tile * r_stride_row_words;
+		    tiled_dma_state <= S_CALC_2;
+		end
+
+		S_CALC_2: begin
+		    // r_curr_row_base_addr <= (r_target_height_tile * r_stride_height_tile_words) +
+		    //	   		    (tile_ic_index      * r_stride_ic_tile_words) + 
+		    // 			    (r_row_in_tile        * r_stride_row_words);
+		    r_curr_row_base_addr <= tile_h_offset + tile_ic_offset + tile_row_offset;
+		    tiled_dma_state <= S_CHECK_BOUNDS;
+		end
 
 		S_CHECK_BOUNDS: begin
                     if (curr_row > abs_end_row) begin
                         tiled_dma_state <= S_DONE;
                     end else begin
                         if (curr_row >= 0 && curr_row < img_height) begin
-                            hbm_addr <= curr_row_base_addr;
+                            // hbm_addr <= curr_row_base_addr;
+			    hbm_addr <= r_curr_row_base_addr;
 			    hbm_ren <= 1;
                             beat_count <= 0;
                             uram_beat_count <= 0;
@@ -138,7 +179,8 @@ module tiled_dma #(
                             // PADDING ROW
                             uram_addr <= uram_addr + (img_width / PP_PAR);
                             curr_row <= curr_row + 1;
-                            tiled_dma_state <= S_CHECK_BOUNDS;
+                            // tiled_dma_state <= S_CHECK_BOUNDS;
+                            tiled_dma_state <= S_CALC_0;
                         end
                     end
                 end
@@ -155,12 +197,14 @@ module tiled_dma #(
                             uram_beat_count <= uram_beat_count + 1;
                         end
                         
-                        if (beat_count == stride_row_words - 1) begin
+                        // if (beat_count == stride_row_words - 1) begin
+                        if (beat_count == r_stride_row_words - 1) begin
                             curr_row <= curr_row + 1;
                             hbm_ren <= 0;
                             beat_count <= 0;
                             uram_beat_count <= 0;
-                            tiled_dma_state <= S_CHECK_BOUNDS;
+                            // tiled_dma_state <= S_CHECK_BOUNDS;
+                            tiled_dma_state <= S_CALC_0;
                         end else begin
                             beat_count <= beat_count + 1;
 			    hbm_ren <= 1;

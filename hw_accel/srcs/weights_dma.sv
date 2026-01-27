@@ -6,7 +6,7 @@ module weights_dma #(
     parameter DATA_WIDTH = 8,
     parameter HBM_DATA_WIDTH = 512,
     // Ensure IC_PAR * OC_PAR is divisible by HBM_DATA_WIDTH
-    parameter BEATS_PER_KERNEL_PIXEL = IC_PAR * OC_PAR * DATA_WIDTH / HBM_DATA_WIDTH,
+    parameter BEATS_PER_KERNEL_PIXEL = (IC_PAR * OC_PAR * DATA_WIDTH + HBM_DATA_WIDTH - 1) / HBM_DATA_WIDTH,
     parameter ADDR_WIDTH = 64,  // HBM Address width
     parameter BRAM_DEPTH = 3 * 3
 )(
@@ -29,7 +29,7 @@ module weights_dma #(
     input wire hbm_rvalid,
     
     // BRAM Interface (Write Port)
-    output reg [15:0] bram_addr,
+    (* max_fanout = 20 *) output reg [15:0] bram_addr,
     output reg [IC_PAR*OC_PAR*DATA_WIDTH-1:0] bram_wdata,
     output reg bram_wen,
 
@@ -44,7 +44,7 @@ module weights_dma #(
     
     reg [1:0] state;
     reg [15:0] curr_y; // Relative to tile start
-    reg [7:0] beat_count;
+    reg [15:0] beat_count;
     reg done_r;
     assign done = done_r;
     

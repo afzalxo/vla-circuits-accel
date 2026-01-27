@@ -153,10 +153,16 @@ I evaluated the N-ISA accelerator on a 3-layer VLA CNN workload (from our origin
 
 - [x]   **End-to-End Model Testing:** Integrate the entire VLA model inference pipeline (multiple conv layers + dense layers). Testing VGG-style model with CARLA dataset. **Update 18th Jan: Fixed and verified a VGG style model with 5 conv layers and 3 dense layers. Input size is 128 x 128, outputs are 3 units of int8 values corresponding to throttle, steering, and brake values. The main issue with making this work was the interface between the last conv layer and the first dense layer: conv layer generataes the output thats not amenable with what the dense layers expect as input. So I added a `flatten` mode the conv layer, which performs a memory layout transformation when writing the output to the memory, so when the first dense layer reads the data from the memory, it 'thinks' it came from a previous dense layer.**
 
-- [ ]   **Language and Prev Output Modalities:** Figure out what to do about the language and previous output modalities. Currently, the hardware only processes image inputs. For now, I am getting the embeddings for these modalities from host processing. I think the prev action modality is easy to handle since I have the dense accelerator already functional. Need to figure out what to do about `nn.EmbeddingBag` on hardware.
+- [ ]   **Language and Prev Output Modalities:** I am implementing a `memcpy` operation on the FPGA. The host will write 64 features for each of language and previous outputs into the HBM 0. The `memcpy` operation is used to 'fuse' the vision feature vector with these.
 
 - [ ]   **On-board Implementation and Testing:** So far, I have done hardware emulation on AMD Alveo U50. This is pretty close to on-board testing. Just need to go the last mile of synthesizing the design, generating the bitstream, and running on-board tests. 
+    - [x] Dealt with various timing-related issues and physical design optimizations to bring the timing from roughly 100 MHz to 220 MHz. Maximum logic levels in the design are reduced to ~12 levels from more than 40 levels.
+    - [ ] Need to deal with high fanout nets. Currently, the main challenge here are control signals like `init_ptr` in `tile_manager.sv` that use counters and are broadcast to `uram_input`s indices.
+    - [ ] I have done on-board testing of the vision modality (i.e., 5 conv layers + 3 dense layers). Need to integrate the language and previous action modalities as well: I am doing this by getting their embeddings from the host and implementing a `memcpy` op on the FPGA to copy from input space to their required location in HBM.
 
 - [x]   **CARLA Integration:** Begin collecting the autonomous driving dataset to train the sparse VLA model for deployment. **Update 12th Jan: Dataset collected. Need to test whether its suitable since we are binning throttle, brake, and steering values into discrete classes.**
+    - [x] Collected a large dataset from carla consisting of 376k samples of driving under different instructions.
+    - [ ] Training a dense model with this dataset and trying to get the validation right since currently the model+dataset suffer from significant biases (like dataset imbalance: most of the dataset collected is that of driving straight). 
+    - [ ] Once the dense model is trained, I will try to extract circuits for different concepts. The dataset contains many concepts such as `near_pedestrian`, `env_night`, `env_rain`, `near_vehicle`, `near_junction`.
 
 ---

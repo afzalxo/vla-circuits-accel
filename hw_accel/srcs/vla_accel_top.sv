@@ -334,7 +334,20 @@ module vla_accel_top #(
 	.cfg_output_bank(cfg_output_bank)
     );
 
-    wire [15:0] img_width_strips = (img_width < PP_PAR) ? 1 : (img_width + PP_PAR - 1) / PP_PAR;
+    // wire [15:0] img_width_strips = (img_width < PP_PAR) ? 1 : (img_width + PP_PAR - 1) / PP_PAR;
+    (* max_fanout = 20 *) reg [15:0] img_width_strips_reg;
+    
+    always @(posedge ap_clk) begin
+        if (img_width < PP_PAR) begin 
+            img_width_strips_reg <= 1;
+        end
+        else begin 
+            img_width_strips_reg <= (img_width + PP_PAR - 1) / PP_PAR;
+	end
+    end
+    
+    wire [15:0] img_width_strips = img_width_strips_reg;
+
 
     tile_manager #(
 	.IC_PAR(IC_PAR),

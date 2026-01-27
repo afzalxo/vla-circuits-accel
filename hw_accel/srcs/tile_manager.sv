@@ -56,7 +56,6 @@ module tile_manager #(
     output reg done
 );
 
-    // !! Used to iterate over tiles !!
     wire [15:0] num_tiles_y = full_img_height / TILE_HEIGHT;
     wire [15:0] num_tiles_ic = full_img_channels / IC_PAR;
     wire [15:0] num_tiles_oc = output_channels / OC_PAR;
@@ -65,7 +64,7 @@ module tile_manager #(
     // Input Buffer: Stores Tile + Halo
     // Size: (TILE_HEIGHT + 2) * MAX_IMG_WIDTH
     // Make sure tools infer URAM here.
-    (* ram_style = "uram" *)
+    (* ram_style = "bram" *)
     reg [PP_PAR*IC_PAR*DATA_WIDTH-1:0] uram_input [0:(TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR - 1];
 
     (* ram_style = "bram" *)
@@ -73,18 +72,28 @@ module tile_manager #(
     
     // Output Buffer: Stores Result
     // Size: TILE_HEIGHT * MAX_IMG_WIDTH
-    // Note: We store the full result here for now.
-    // In a real system, we would DMA this back to HBM.
-    (* ram_style = "uram" *)
-    reg [PP_PAR*OC_PAR*ACC_WIDTH-1:0] uram_output [0:TILE_HEIGHT*MAX_IMG_WIDTH/PP_PAR - 1];
+    // (* ram_style = "uram" *)  // TODO: 1
+    // reg [PP_PAR*OC_PAR*ACC_WIDTH-1:0] uram_output [0:TILE_HEIGHT*MAX_IMG_WIDTH/PP_PAR - 1];
 
     reg [15:0] current_tile_y;
     reg [15:0] current_tile_ic;
-
     reg [15:0] current_tile_oc;
     
-    wire [15:0] rows_remaining = full_img_height - (current_tile_y * TILE_HEIGHT);
-    wire [15:0] active_height = (rows_remaining < TILE_HEIGHT) ? rows_remaining : TILE_HEIGHT;
+    // wire [15:0] rows_remaining = full_img_height - (current_tile_y * TILE_HEIGHT);
+    // wire [15:0] active_height = (rows_remaining < TILE_HEIGHT) ? rows_remaining : TILE_HEIGHT;
+    reg [15:0] rows_remaining;
+    reg [15:0] active_height;
+
+    /*
+    always @(posedge clk) begin
+        rows_remaining <= full_img_height - (current_tile_y * TILE_HEIGHT);
+        
+        if ((full_img_height - (current_tile_y * TILE_HEIGHT)) < TILE_HEIGHT)
+            active_height <= (full_img_height - (current_tile_y * TILE_HEIGHT));
+        else
+            active_height <= TILE_HEIGHT;
+    end
+    */
 
     // DMA Signals
     reg dma_start;
@@ -98,13 +107,15 @@ module tile_manager #(
     wire [15:0] dma_uram_fmap_out_addr;
     wire [PP_PAR*IC_PAR*DATA_WIDTH-1:0] dma_wdata;
     wire [IC_PAR*OC_PAR*DATA_WIDTH-1:0] dma_w_wdata;
-    reg  [PP_PAR*OC_PAR*ACC_WIDTH-1:0] dma_fmap_out_wdata;
+    // reg  [PP_PAR*OC_PAR*ACC_WIDTH-1:0] dma_fmap_out_wdata;  // TODO 2
+    wire [PP_PAR*OC_PAR*ACC_WIDTH-1:0] dma_fmap_out_wdata;
     wire dma_wen;
     wire dma_w_wen;
     wire dma_uram_ren;
     
     reg output_dma_start;
-    reg output_dma_done;
+    // reg output_dma_done;  // TODO 4
+    wire output_dma_done;
     // Accelerator Signals
     reg acc_start;
     wire acc_done;
@@ -121,8 +132,25 @@ module tile_manager #(
     wire acc_weights_ack;
     // Streamer Signals
     reg [15:0] stream_ptr;
+    reg [15:0] stream_ptr_ulimit;
     reg [15:0] out_ptr;
 
+    reg [3:0] tile_manager_state;
+
+    localparam S_IDLE = 0;
+    localparam S_DMA_FM  = 1;
+    localparam S_DMA_W   = 6;
+    localparam S_INIT_URAM = 7;
+    localparam S_ACC_START = 2;
+    localparam S_ACC_STREAM = 3;
+    localparam S_ACC_WAIT = 4;
+    localparam S_NEXT_TILE = 5;
+    localparam S_CHECK_IC_MASK = 9;
+    localparam S_CHECK_OC_MASK = 10;
+    localparam S_WRITE_OUTPUT = 8;
+    localparam S_CALC_CONSTS_0 = 11;
+    localparam S_CALC_CONSTS_1 = 12;
+ 
     tiled_dma #(
         .IC_PAR(IC_PAR),
 	.PP_PAR(PP_PAR),
@@ -149,25 +177,6 @@ module tile_manager #(
         .done(dma_done)
     );
 
-    /*
-    flatten_unit #(
-	.DATA_WIDTH(DATA_WIDTH),
-	.CHANNELS_PAR(OC_PAR),
-	.PP_PAR(PP_PAR),
-	.HBM_DATA_WIDTH(GMEM_DATA_WIDTH),
-	.ADDR_WIDTH(64),
-	.TILE_HEIGHT(TILE_HEIGHT)
-    ) flatten_unit_inst (
-	.clk(clk), .rst_n(rst_n),
-	.start(start_flatten),
-	.src_addr_base(hbm_addr_src),
-	.dst_addr_base(hbm_addr_dst),
-	.img_width(full_img_width_strips * PP_PAR),
-	.img_height(full_img_height),
-	.img_channels(output_channels),
-	    )
-    */
-    
     weights_dma #(
         .IC_PAR(IC_PAR),
 	.OC_PAR(OC_PAR),
@@ -190,6 +199,30 @@ module tile_manager #(
         .bram_wen(dma_w_wen),
         .done(dma_w_done)
     );
+
+    // Controls reset of pointers
+    wire acc_clear_ptr = (tile_manager_state == S_ACC_START);
+    // Controls accumulation mode (0 for first IC tile, 1 for subsequent)
+    wire acc_accumulate = (current_tile_ic != 0);
+
+    localparam RES_ACCUM_DEPTH = TILE_HEIGHT * MAX_IMG_WIDTH / PP_PAR;
+    localparam RES_ACCUM_ADDR_WIDTH = $clog2(RES_ACCUM_DEPTH);
+
+    result_accumulator #(
+        .IC_PAR(IC_PAR), .OC_PAR(OC_PAR), .PP_PAR(PP_PAR), .ACC_WIDTH(ACC_WIDTH),
+        .DEPTH(RES_ACCUM_DEPTH), .ADDR_WIDTH(RES_ACCUM_ADDR_WIDTH)
+    ) res_acc (
+        .clk(clk), .rst_n(rst_n),
+        .clear_ptr(acc_clear_ptr),
+        .accumulate_en(acc_accumulate),
+        .acc_in_data(acc_dout_data),
+        .acc_in_valid(acc_dout_valid),
+        .stride(stride),
+        .dma_raddr(dma_uram_fmap_out_addr[RES_ACCUM_ADDR_WIDTH-1:0]), // Truncate to ADDR_WIDTH
+        .dma_ren(dma_uram_ren),
+        .dma_rdata_packed(dma_fmap_out_wdata)
+    );
+
 
     output_dma #(
 	.OC_PAR(OC_PAR),
@@ -244,33 +277,27 @@ module tile_manager #(
         .done(acc_done)
     );
 
+    reg [15:0] init_ptr;
+    reg init_active;
+
     // --- URAM WRITE LOGIC (DMA -> URAM) ---
     always @(posedge clk) begin
-        if (dma_wen) begin
+	if (init_active) begin
+	    uram_input[init_ptr - 1] <= 0;
+	end else if (dma_wen) begin
             uram_input[dma_uram_addr-1] <= dma_wdata;
         end
 	if (dma_w_wen) begin
 	    weights_bram[dma_w_bram_addr-1] <= dma_w_wdata;
 	end
-	if (dma_uram_ren) begin
-	    dma_fmap_out_wdata <= uram_output[dma_uram_fmap_out_addr];
-	end
+	// if (dma_uram_ren) begin  // TODO: 3
+	//    dma_fmap_out_wdata <= uram_output[dma_uram_fmap_out_addr];
+	// end
     end
     
-    reg [3:0] tile_manager_state;
 
-    localparam S_IDLE = 0;
-    localparam S_DMA_FM  = 1;
-    localparam S_DMA_W   = 6;
-    localparam S_INIT_URAM = 7;
-    localparam S_ACC_START = 2;
-    localparam S_ACC_STREAM = 3;
-    localparam S_ACC_WAIT = 4;
-    localparam S_NEXT_TILE = 5;
-    localparam S_CHECK_IC_MASK = 9;
-    localparam S_CHECK_OC_MASK = 10;
-    localparam S_WRITE_OUTPUT = 8;
- 
+
+    /*
     integer p, o;
     // --- URAM WRITE LOGIC (Accelerator -> Output URAM) ---
     // We simply append results linearly
@@ -301,6 +328,7 @@ module tile_manager #(
 	    out_ptr <= out_ptr + 1;
         end
     end
+    */
    
     integer i;
     
@@ -315,9 +343,14 @@ module tile_manager #(
             acc_din_valid <= 0;
             stream_ptr <= 0;
             done <= 0;
+	    init_active <= 0;
+	    init_ptr <= 0;
 	    dma_done_r <= 0;
 	    dma_w_done_r <= 0;
 	    output_dma_start <= 0;
+	    rows_remaining <= 0;
+	    active_height <= 0;
+	    stream_ptr_ulimit <= 0;
         end else begin
             dma_start <= 0;
 	    weights_dma_start <= 0;
@@ -327,27 +360,51 @@ module tile_manager #(
                 S_IDLE: begin
 		    done <= 0;
                     if (start) begin
+			init_active <= 0;
+			init_ptr <= 0;
                         current_tile_y <= 0;
 			current_tile_ic <= 0;
 			current_tile_oc <= 0;
                         out_ptr <= 0; // Reset output pointer
-                        tile_manager_state <= S_INIT_URAM;
+			stream_ptr_ulimit <= 0;
+                        // tile_manager_state <= S_INIT_URAM;
+                        tile_manager_state <= S_CALC_CONSTS_0;
                     end
                 end
 
-		S_INIT_URAM: begin
-		    for (i = 0; i < (TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR; i = i + 1) begin
-			uram_input[i] <= 0;
-		    end
-		    if (is_sparse) begin
-			tile_manager_state <= S_CHECK_OC_MASK;
+		S_CALC_CONSTS_0: begin
+		    // Compute active height
+		    if ((full_img_height - (current_tile_y * TILE_HEIGHT)) < TILE_HEIGHT) begin
+			active_height <= (full_img_height - (current_tile_y * TILE_HEIGHT));
 		    end else begin
-		        dma_start <= 1;
-                        weights_dma_start <= 1;
-                        dma_done_r <= 0;
-                        dma_w_done_r <= 0;
-		        tile_manager_state <= S_DMA_FM;
-	    	    end
+			active_height <= TILE_HEIGHT;
+		    end
+		    tile_manager_state <= S_CALC_CONSTS_1;
+		end
+
+		S_CALC_CONSTS_1: begin
+		    stream_ptr_ulimit <= (active_height + 2) * full_img_width_strips;
+		    tile_manager_state <= S_INIT_URAM;
+		end
+
+		S_INIT_URAM: begin
+		    init_active <= 1;
+		    if (init_ptr == (TILE_HEIGHT+2)*MAX_IMG_WIDTH/PP_PAR) begin
+                        // Done clearing
+                        init_active <= 0;
+                        init_ptr <= 0;
+		        if (is_sparse) begin
+		            tile_manager_state <= S_CHECK_OC_MASK;
+		        end else begin
+		            dma_start <= 1;
+                            weights_dma_start <= 1;
+                            dma_done_r <= 0;
+                            dma_w_done_r <= 0;
+		            tile_manager_state <= S_DMA_FM;
+	    	        end
+		    end else begin
+		        init_ptr <= init_ptr + 1;
+		    end
 		end
                 
                 // 1. Load Tile from HBM to URAM
@@ -378,7 +435,8 @@ module tile_manager #(
                     // Simple Valid/Ready Handshake
                     // We assume URAM read is 0-latency (Register file behavior for sim)
                     // In real HW, need 1-cycle read latency handling
-                    if (stream_ptr < (active_height + 2) * full_img_width_strips) begin
+                    // if (stream_ptr < (active_height + 2) * full_img_width_strips) begin
+                    if (stream_ptr < stream_ptr_ulimit) begin
                         acc_din_valid <= 1;
                         acc_din_data <= uram_input[stream_ptr];
                         
@@ -446,7 +504,8 @@ module tile_manager #(
 				current_tile_y <= current_tile_y + 1;
 				current_tile_oc <= 0;
 				current_tile_ic <= 0;
-				tile_manager_state <= S_INIT_URAM;
+				// tile_manager_state <= S_INIT_URAM;
+				tile_manager_state <= S_CALC_CONSTS_0;
 			    end
                         end else begin
                             current_tile_oc <= current_tile_oc + 1;
@@ -477,7 +536,8 @@ module tile_manager #(
 				current_tile_y <= current_tile_y + 1;
 				current_tile_oc <= 0;
 				current_tile_ic <= 0;
-				tile_manager_state <= S_INIT_URAM;
+				// tile_manager_state <= S_INIT_URAM;
+				tile_manager_state <= S_CALC_CONSTS_0;
 			    end
 			end else begin
 			    current_tile_oc <= current_tile_oc + 1;
@@ -490,111 +550,5 @@ module tile_manager #(
             endcase
         end
     end
-
-`ifdef XILINX_SIMULATOR
-    integer f_dump;
-    integer i_dump;
-    integer ff_dump;
-    integer out_dump;
-
-    reg [PP_PAR*OC_PAR*8-1:0] packed_quant_row;
-    reg signed [27:0] raw_acc;
-    reg signed [27:0] shifted_acc;
-    reg signed [7:0]  clamped_val;
-    integer p_idx, o_idx;
-    
-    initial begin
-
-	wait(tile_manager_state == S_ACC_START);
-        #1;
-        
-        $display("[SIM-DEBUG] Dumping Input URAM Content...");
-        f_dump = $fopen("hw_dump_input_uram.txt", "w");
-        
-        // Dump all rows (TILE_HEIGHT + 2)
-        // Each row has (img_width / PP_PAR) words
-        for (i_dump = 0; i_dump < (TILE_HEIGHT + 2) * (full_img_width_strips); i_dump = i_dump + 1) begin
-            $fdisplay(f_dump, "Addr %0d: %h", i_dump, uram_input[i_dump]);
-        end
-        $fclose(f_dump);
-	
-        // Wait until the controller signals that loading is finished
-        // You might need to pass 'load_done' into this module or trigger on a tile_manager_state
-        wait(tile_manager_state == S_ACC_START && current_tile_y == 0 && current_tile_ic == 0);
-        
-        // Wait a few cycles for stability
-        #2;
-        
-        $display("[SIM-DEBUG] Dumping Weight Memory to file...");
-        f_dump = $fopen("hw_dump_weights.txt", "w");
-        $display("[SIM-DEBUG] Dumping Feature Memory to file...");
-        ff_dump = $fopen("hw_dump_features.txt", "w");
-        
-        if (f_dump == 0) begin
-            $display("Error: Could not open dump file!");
-            $finish;
-        end
-
-        // Iterate through the memory depth
-        for (i_dump = 0; i_dump < 9; i_dump = i_dump + 1) begin
-            // %h prints hex. It prints MSB to LSB.
-            $fdisplay(f_dump, "%h", weights_bram[i_dump]);
-        end
-
-	for (i_dump = 0; i_dump < TILE_HEIGHT * full_img_width_strips; i_dump = i_dump + 1) begin
-	    // %h prints hex. It prints MSB to LSB.
-	    $fdisplay(ff_dump, "%h", uram_input[i_dump]);
-	end
-        
-        $fclose(f_dump);
-	$fclose(ff_dump);
-        $display("[SIM-DEBUG] Dump complete.");
-
-        wait(current_tile_oc == 0 && current_tile_y == 1 && current_tile_ic == 0);
-
-	#2;
-	
-	$display("[SIM-DEBUG] Dumping Output to file...");
-	out_dump = $fopen("hw_dump_output.txt", "w");
-	for (i_dump = 0; i_dump < TILE_HEIGHT * full_img_width_strips; i_dump = i_dump + 1) begin
-	    $fdisplay(out_dump, "%h", uram_output[i_dump]);
-	end
-        $fclose(out_dump);
-	$display("[SIM-DEBUG] Output Dump complete...");
-	f_dump = $fopen("hw_dump_output_quant.txt", "w");
-        for (i_dump = 0; i_dump < TILE_HEIGHT * full_img_width_strips; i_dump = i_dump + 1) begin
-            // Process one URAM word (contains PP_PAR * OC_PAR accumulators)
-            for (p_idx = 0; p_idx < PP_PAR; p_idx = p_idx + 1) begin
-                for (o_idx = 0; o_idx < OC_PAR; o_idx = o_idx + 1) begin
-                    
-                    // 1. Extract the 28-bit Accumulator
-                    // Note: 28 is the ACC_WIDTH
-                    raw_acc = uram_output[i_dump][((p_idx*OC_PAR + o_idx)*28) +: 28];
-                    
-                    // 2. Apply Arithmetic Right Shift (Matches C++ ">> 10")
-                    shifted_acc = raw_acc >>> 10;
-                    
-                    // 3. Saturate / Clamp to 8-bit Signed Range
-                    if (shifted_acc > 127) 
-                        clamped_val = 8'd127;
-                    else if (shifted_acc < -128) 
-                        clamped_val = -8'd128;
-                    else 
-                        clamped_val = shifted_acc[7:0];
-                    
-                    // 4. Pack into the temporary 8-bit bus
-                    // Note: 8 is the OUT_WIDTH
-                    packed_quant_row[((p_idx*OC_PAR + o_idx)*8) +: 8] = clamped_val;
-                end
-            end
-            
-            // Write the packed 8-bit hex string to file
-            $fdisplay(f_dump, "%h", packed_quant_row);
-        end
-        $fclose(f_dump);
-    end
-`endif
-
-
 
 endmodule

@@ -45,7 +45,8 @@ module conv_accelerator #(
     assign dout_valid = is_conv ? conv_controller_dout_valid : cu_valid_out;
 
     conv_controller #(
-        .MAX_IMG_WIDTH(MAX_IMG_WIDTH), .PP_PAR(PP_PAR)
+        .MAX_IMG_WIDTH(MAX_IMG_WIDTH),
+	.IC_PAR(IC_PAR)
     ) ctrl (
         .clk(clk), .rst_n(rst_n), .start(start),
         .img_width_strips(img_width_strips), .img_height(img_height),

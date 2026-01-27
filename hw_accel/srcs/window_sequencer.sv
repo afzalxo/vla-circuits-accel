@@ -21,7 +21,7 @@ module window_sequencer #(
     input wire signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] lb_row_1,
     input wire signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] lb_row_2,
     
-    output reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] pixels_out
+    output wire signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] pixels_out
 );
 
     // --- REGISTERS ---
@@ -70,6 +70,14 @@ module window_sequencer #(
     reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] selected_next;
     reg signed [IC_PAR-1:0][DATA_WIDTH-1:0] selected_prev_pixel;
     
+    reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] pixels_out_comb;
+    (* max_fanout = 20 *) reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] pixels_out_reg;
+
+    always @(posedge clk) begin
+        pixels_out_reg <= pixels_out_comb;
+    end
+    // assign pixels_out = pixels_out_comb;
+    assign pixels_out = pixels_out_comb;
     // 1. Select Row (Vertical Padding)
     always @(*) begin
         selected_curr = 0; selected_next = 0; selected_prev_pixel = 0;
@@ -100,31 +108,31 @@ module window_sequencer #(
             case (kernel_x)
                 2'd0: begin // Left
                     if (p == 0) begin
-                        if (col_idx == 0) pixels_out[p] = 0; 
-                        else              pixels_out[p] = selected_prev_pixel;
+                        if (col_idx == 0) pixels_out_comb[p] = 0; 
+                        else              pixels_out_comb[p] = selected_prev_pixel;
                     end else begin
-                        pixels_out[p] = selected_curr[p-1];
+                        pixels_out_comb[p] = selected_curr[p-1];
                     end
                 end
                 
                 2'd1: begin // Center
-                    pixels_out[p] = selected_curr[p];
+                    pixels_out_comb[p] = selected_curr[p];
                 end
                 
                 2'd2: begin // Right
                     if (p == PP_PAR-1) begin
                         // LOOKAHEAD LOGIC
                         if (col_idx == img_width_strips - 1) begin
-                            pixels_out[p] = 0; // Image Boundary
+                            pixels_out_comb[p] = 0; // Image Boundary
                         end else begin
                             // Use the first pixel of the NEXT strip
-                            pixels_out[p] = selected_next[0]; 
+                            pixels_out_comb[p] = selected_next[0]; 
                         end
                     end else begin
-                        pixels_out[p] = selected_curr[p+1];
+                        pixels_out_comb[p] = selected_curr[p+1];
                     end
                 end
-                default: pixels_out[p] = 0;
+                default: pixels_out_comb[p] = 0;
             endcase
         end
     end

@@ -2,7 +2,8 @@
 
 module conv_controller #(
     parameter MAX_IMG_WIDTH = 128,
-    parameter PP_PAR = 8
+    parameter IC_PAR = 16,
+    parameter LATENCY = 2 + $clog2(IC_PAR)
 )(
     input wire clk,
     input wire rst_n,
@@ -19,14 +20,14 @@ module conv_controller #(
     output reg weight_req,
     input wire weight_ack,
     
-    output reg lb_shift_en,
+    (* max_fanout = 20 *) output reg lb_shift_en,
     output reg seq_load,
-    output reg [1:0] k_x,
-    output reg [1:0] k_y,
-    input wire [1:0] stride,
-    input wire is_conv,
-    output reg cu_en,
-    output reg cu_clear,
+    (* max_fanout = 20 *) output reg [1:0] k_x,
+    (* max_fanout = 20 *) output reg [1:0] k_y,
+    (* max_fanout = 20 *) input wire [1:0] stride,
+    (* max_fanout = 20 *) input wire is_conv,
+    (* max_fanout = 20 *) output reg cu_en,
+    (* max_fanout = 20 *) output reg cu_clear,
     
     output reg [15:0] col_idx,
     output reg [15:0] row_idx,
@@ -57,8 +58,17 @@ module conv_controller #(
     reg [15:0] load_row_cnt;
     reg [3:0] pipe_flush_cnt;
 
+    reg [15:0] height_limit; 
+    reg row_is_valid;
     // assign k_x = (!is_conv) ? 2'd1 : (kernel_step % 3);
     // assign k_y = (!is_conv) ? 2'd1 : (kernel_step / 3);
+    //
+    wire [15:0] next_row_idx = row_idx + 1;
+    
+    // Helper for validity check (Optimized Modulo)
+    // If stride=1, always true. If stride=2, check LSB is 0.
+    wire next_row_mod_ok = (stride == 1) || (next_row_idx[0] == 0);
+    wire next_row_in_bounds = (next_row_idx < height_limit);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -77,7 +87,8 @@ module conv_controller #(
             kernel_step <= 0;
             pipe_flush_cnt <= 0;
 	    weight_req <= 0;
-
+	    height_limit <= 0;
+	    row_is_valid <= 1;
         end else begin
             // Default Pulses
             lb_shift_en <= 0;
@@ -92,6 +103,8 @@ module conv_controller #(
                         load_row_cnt <= 0;
                         col_idx <= 0;
                         row_idx <= 0;
+			height_limit <= img_height - 2;
+			row_is_valid <= 1;
                         state <= S_PRIME_ROW;
                     end
                 end
@@ -211,12 +224,13 @@ module conv_controller #(
                 S_WAIT: begin
 		    cu_en <= 0;
 		    cu_clear <= 0;
-                    if (pipe_flush_cnt == 5) begin
+                    if (pipe_flush_cnt == LATENCY) begin
                             dout_valid <= 1;
                             // Update Output Coordinate
                             if (col_idx == img_width_strips - 1) begin
                                 col_idx <= 0;
                                 row_idx <= row_idx + 1;
+				row_is_valid <= next_row_in_bounds && next_row_mod_ok;
                             end else begin
                                 col_idx <= col_idx + 1;
                             end
@@ -247,7 +261,6 @@ module conv_controller #(
                         din_ready <= 1;
 			lb_shift_en <= 1;
                         if (din_valid && din_ready) begin
-                            // seq_load <= 1;
                             din_ready <= 0;
 			    lb_shift_en <= 0;
                             
@@ -257,15 +270,6 @@ module conv_controller #(
                             end else begin
                                 load_col_cnt <= load_col_cnt + 1;
                             end
-			    /*
-                            if (row_idx < img_height - 2 && row_idx % stride == 0) begin  // Only compute for valid data
-				cu_clear <= 1;
-			        kernel_step <= 0;
-				state <= S_COMPUTE;
-		 	    end else begin	
-			        state <= S_SKIP_COMPUTE;
-		            end
-			    */
 			    state <= S_FETCH_WAIT;
                         end
                     end
@@ -279,7 +283,8 @@ module conv_controller #(
                         state <= S_FETCH_PULSE_2;
                     end else begin
                         // Multi Strip: Pipeline is fine
-                        if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+			// if (row_idx < height_limit && ((stride == 1) || row_idx[0] == 0)) begin
+                        if (row_is_valid) begin
                             cu_clear <= 1;
                             kernel_step <= 0;
                             state <= S_COMPUTE;
@@ -292,7 +297,8 @@ module conv_controller #(
 		S_FETCH_PULSE_2: begin
                     seq_load <= 1; // Pulse 2: Next -> Curr
                     
-                    if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+		    // if (row_idx < height_limit && ((stride == 1) || row_idx[0] == 0)) begin
+                    if (row_is_valid) begin
                         cu_clear <= 1;
                         kernel_step <= 0;
                         state <= S_COMPUTE;
@@ -309,6 +315,7 @@ module conv_controller #(
                     if (col_idx == img_width_strips - 1) begin
                         col_idx <= 0;
                         row_idx <= row_idx + 1;
+			row_is_valid <= next_row_in_bounds && next_row_mod_ok;
                     end else begin
                         col_idx <= col_idx + 1;
                     end
@@ -336,18 +343,10 @@ module conv_controller #(
 		        end else begin
 		    	    load_col_cnt <= load_col_cnt + 1;
 		        end
-			/*
-			if (row_idx < img_height - 2 && row_idx % stride == 0) begin
-                            cu_clear <= 1;
-                            kernel_step <= 0;
-                            state <= S_COMPUTE;
-                        end else begin
-                            state <= S_SKIP_COMPUTE;
-                        end
-			*/
 			if (img_width_strips == 1) state <= S_FETCH_PULSE_2;
 			else begin
-			    if (row_idx < img_height - 2 && row_idx % stride == 0) begin
+			    // if (row_idx < height_limit && ((stride == 1) || row_idx[0] == 0)) begin
+			    if (row_is_valid) begin
                                 cu_clear <= 1;
                                 kernel_step <= 0;
                                 state <= S_COMPUTE;

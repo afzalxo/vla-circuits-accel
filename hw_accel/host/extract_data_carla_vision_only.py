@@ -23,6 +23,9 @@ DEVICE = torch.device("cpu")
 STACK_FRAMES = 4
 IMG_SIZE = 128
 INPUT_SCALE = 127.0 
+IC_PAR = 32
+PP_PAR = 2
+TILE_HEIGHT = 4
 
 def save_binary(data, filename):
     if not os.path.exists(OUTPUT_DIR):
@@ -103,9 +106,6 @@ def reorder_weights_for_hardware(weight_tensor_chw, C, H, W):
         weight_tensor_chw: [Out, C, H, W] (Standard PyTorch Shape)
     """
     Out_Dim = weight_tensor_chw.shape[0]
-    IC_PAR = 16
-    PP_PAR = 8
-    TILE_HEIGHT = 4
     
     num_h_tiles = (H + TILE_HEIGHT - 1) // TILE_HEIGHT
     num_c_tiles = (C + IC_PAR - 1) // IC_PAR
@@ -238,7 +238,8 @@ def extract():
     w_fc1_vis = w_fc1[:, :4096]
     
     print("  Reordering weights to Blocked Planar...")
-    w_fc1_reordered = reorder_weights_for_hardware(w_fc1_vis.view(512, 64, 8, 8), C=64, H=8, W=8)
+    # w_fc1_reordered = reorder_weights_for_hardware(w_fc1_vis.view(512, 64, 8, 8), C=64, H=8, W=8)
+    w_fc1_reordered = reorder_weights_for_hardware(w_fc1_vis.view(512, 256, 4, 4), C=256, H=4, W=4)
     
     w_fc1_int8, _ = quantize_tensor(w_fc1_reordered)
     save_binary(w_fc1_int8.numpy(), "weights_fc1.bin")

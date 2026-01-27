@@ -72,3 +72,10 @@ Added dataset collection script for carla, and model+training script for carla d
 ## 18 Jan (Hw Accel)
 
 End-to-end hardware verification of new VGG-style model on Carla dataset with 128 x 128 image inputs. Tested and functional verification done for input images obtained from the dataset, and weights obtained from the saved model pth. So far, only the vision modality is being processed on the hardware. 
+
+
+## 27 Jan (Model + Dataset)
+
+Collected a large dataset (376k samples, 256x256 images) from Carla with various per-frame concept latbels such as `near_pedestrian`, `env_night`, `env_rain`, `near_vehicle`, `near_junction`.
+
+Expanded model to larger image inputs. Currently in the process of training the model and trying to get its performance right. Currently, there seems to a dataset imbalance issue: most of the data is that of the vehicle driving straight, so the model is biased towards regressing low steer values, hence often performs abysmally (e.g., isnt able to steer well when the road curves). Working on solving this and many other issues. 
