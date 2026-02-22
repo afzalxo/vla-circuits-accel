@@ -1,6 +1,6 @@
 #!/bin/sh
 
-target=hw_emu
+target=hw
 fpga=u50
 
 rm -rf link_${fpga}_${target}_2025

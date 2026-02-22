@@ -6,7 +6,7 @@ module vla_accel_top #(
     parameter PP_PAR = 8,
     parameter DATA_WIDTH = 8,
 
-    parameter MAX_IMG_WIDTH = 128,
+    parameter MAX_IMG_WIDTH = 256,
     parameter TILE_HEIGHT = 4,
     
     parameter C_M_AXI_GMEM_ADDR_WIDTH = 64,
@@ -81,16 +81,24 @@ module vla_accel_top #(
     // Start, ready and done signals
     wire start_process_internal; // Pulse from controller to start core logic
     wire process_done_internal; // Signal from core logic to controller
-    reg ap_idle_reg;
+    reg ap_idle_reg = 1'b1;
     reg ap_done_reg;
+    reg ap_ready_reg;
     wire ap_idle = ap_idle_reg;
-    wire ap_ready = ap_done_reg;
+    wire ap_ready = ap_ready_reg;
     always @(posedge ap_clk or negedge ap_rst_n) begin
 	if (!ap_rst_n) begin
             ap_idle_reg <= 1'b1;
+	    ap_done_reg <= 1'b0;
+	    ap_ready_reg <= 1'b0;
 	end else begin
-	    ap_idle_reg <= process_done_internal ? 1'b1 :
-		   	   start_process_internal ? 1'b0 : ap_idle;
+	    if (start_process_internal) begin
+		ap_idle_reg <= 1'b0;
+	    end else if (process_done_internal) begin
+		ap_idle_reg <= 1'b1;
+	    end
+	    ap_ready_reg <= process_done_internal;
+	    ap_done_reg <= process_done_internal;
 	end
     end
 
@@ -122,6 +130,13 @@ module vla_accel_top #(
     wire [63:0] cfg_output_offset;
     wire [63:0] cfg_weight_offset;
 
+    wire [15:0] img_width, img_height, img_channels;
+    wire [15:0] out_channels;
+    wire [4:0] quant_shift;
+    wire is_conv;
+    wire is_memcpy;
+    wire is_gap;
+
     wire [63:0] base_hbm0 = heap_base_addr;
     wire [63:0] base_hbm1 = hbm_reg_a_addr;
     wire [63:0] base_hbm2 = hbm_reg_b_addr;
@@ -134,10 +149,22 @@ module vla_accel_top #(
 	    			      (cfg_output_bank == 2'b01) ? base_hbm1 :
 				      (cfg_output_bank == 2'b10) ? base_hbm2 : base_hbm0;
 
-    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_addr = current_input_base + cfg_input_offset + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_vec_read_addr_base = current_input_base + cfg_input_offset;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_vec_read_addr;
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_fm_read_addr = current_input_base + cfg_input_offset + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + cfg_weight_offset + (hbm_winput_addr << 6);
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = current_output_base + cfg_output_offset + (hbm_foutput_addr << 6);
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] memcpy_awaddr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] memcpy_awaddr_base = current_output_base + cfg_output_offset;
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] gap_src_addr_base = current_input_base + cfg_input_offset;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] gap_araddr;
+
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] gap_dst_addr_base = current_output_base + cfg_output_offset;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] gap_awaddr;
 
     vla_accel_control_s_axi #(
         .C_S_AXI_ADDR_WIDTH(C_S_AXI_ADDR_WIDTH),
@@ -174,7 +201,7 @@ module vla_accel_top #(
     );
 
     wire read_master_data_valid;
-    wire hbm_read_start;
+    wire hbm_read_fm_start;
     wire hbm_load_done;
     wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] read_master_data_out;
     wire [15:0] feature_map_words;
@@ -185,8 +212,8 @@ module vla_accel_top #(
     ) hbm_feat_read_master_inst (
         .clk(ap_clk),
         .rst_n(ap_rst_n),
-        .start(hbm_read_start),
-	.base_address(hbm_read_addr),
+        .start(hbm_read_fm_start),
+	.base_address(hbm_fm_read_addr),
 
         .m_axi_arvalid(feat_arvalid),
         .m_axi_arready(m_axi_gmem_arready),
@@ -203,6 +230,124 @@ module vla_accel_top #(
         .data_valid(read_master_data_valid),
         .data_out(read_master_data_out),
         .done(hbm_load_done)
+    );
+
+    wire memcpy_done;
+    wire memcpy_arvalid;
+    wire [31:0] memcpy_length_bytes = {16'd0, out_channels};
+    wire [7:0]  memcpy_arlen;
+    wire [2:0]  memcpy_arsize;
+    wire [1:0]  memcpy_arburst;
+    wire        memcpy_rready;
+
+    wire memcpy_awvalid, memcpy_wvalid;
+    wire [7:0]  memcpy_awlen;
+    wire [2:0]  memcpy_awsize;
+    wire [1:0]  memcpy_awburst;
+    wire        memcpy_wready;
+    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] memcpy_wdata;
+    wire [C_M_AXI_GMEM_DATA_WIDTH/8-1:0] memcpy_wstrb;
+    wire        memcpy_wlast;
+    wire        memcpy_bready;
+
+    memcpy_unit #(
+	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
+	.DATA_WIDTH(C_M_AXI_GMEM_DATA_WIDTH)
+    ) memcpy_unit_inst (
+	.clk(ap_clk),
+	.rst_n(ap_rst_n),
+	.start(memcpy_start),
+
+	.src_addr_base(hbm_vec_read_addr_base),
+	.dst_addr_base(memcpy_awaddr_base),
+	.length_bytes(memcpy_length_bytes),
+
+	.m_axi_arvalid(memcpy_arvalid),
+	.m_axi_arready(m_axi_gmem_arready),
+	.m_axi_araddr(hbm_vec_read_addr),
+	.m_axi_arlen(memcpy_arlen),
+	.m_axi_arsize(memcpy_arsize),
+	.m_axi_arburst(memcpy_arburst),
+	.m_axi_rvalid(m_axi_gmem_rvalid),
+	.m_axi_rready(memcpy_rready),
+	.m_axi_rdata(m_axi_gmem_rdata),
+
+	.m_axi_awvalid(memcpy_awvalid),
+	.m_axi_awready(m_axi_fo_gmem_awready),
+	.m_axi_awaddr(memcpy_awaddr),
+	.m_axi_awlen(memcpy_awlen),
+	.m_axi_awsize(memcpy_awsize),
+	.m_axi_awburst(memcpy_awburst),
+	.m_axi_wvalid(memcpy_wvalid),
+	.m_axi_wready(m_axi_fo_gmem_wready),
+	.m_axi_wdata(memcpy_wdata),
+	.m_axi_wstrb(memcpy_wstrb),
+	.m_axi_wlast(memcpy_wlast),
+	.m_axi_bvalid(m_axi_fo_gmem_bvalid),
+	.m_axi_bready(memcpy_bready),
+	.m_axi_bresp(m_axi_fo_gmem_bresp),
+	.done(memcpy_done)
+    );
+
+    wire gap_done;
+    wire gap_arvalid;
+    wire [7:0]  gap_arlen;
+    wire [2:0]  gap_arsize;
+    wire [1:0]  gap_arburst;
+    wire        gap_rready;
+
+    wire gap_awvalid, gap_wvalid;
+    wire [7:0]  gap_awlen;
+    wire [2:0]  gap_awsize;
+    wire [1:0]  gap_awburst;
+    wire        gap_wready;
+    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] gap_wdata;
+    wire [C_M_AXI_GMEM_DATA_WIDTH/8-1:0] gap_wstrb;
+    wire        gap_wlast;
+    wire        gap_bready;
+
+    gap_unit #(
+	.IC_PAR(IC_PAR),
+	.PP_PAR(PP_PAR),
+	.HBM_DATA_WIDTH(C_M_AXI_GMEM_DATA_WIDTH),
+        .ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
+	.TILE_HEIGHT(TILE_HEIGHT)
+    ) gap_unit_inst (
+	.clk(ap_clk),
+	.rst_n(ap_rst_n),
+	.start(gap_start),
+	.src_addr_base(gap_src_addr_base),
+	.dst_addr_base(gap_dst_addr_base),
+	.img_width(img_width),
+	.img_height(img_height),
+	.img_channels(img_channels),
+	.log2_mem_tile_height(log2_mem_tile_height),
+	.quant_shift(quant_shift),
+	.m_axi_arvalid(gap_arvalid),
+	.m_axi_arready(m_axi_gmem_arready),
+	.m_axi_araddr(gap_araddr),
+	.m_axi_arlen(gap_arlen),
+	.m_axi_arsize(gap_arsize),
+	.m_axi_arburst(gap_arburst),
+	.m_axi_rvalid(m_axi_gmem_rvalid),
+	.m_axi_rready(gap_rready),
+	.m_axi_rdata(m_axi_gmem_rdata),
+
+	.m_axi_awvalid(gap_awvalid),
+	.m_axi_awready(m_axi_fo_gmem_awready),
+	.m_axi_awaddr(gap_awaddr),
+	.m_axi_awlen(gap_awlen),
+	.m_axi_awsize(gap_awsize),
+	.m_axi_awburst(gap_awburst),
+	.m_axi_wvalid(gap_wvalid),
+	.m_axi_wready(m_axi_fo_gmem_wready),
+	.m_axi_wdata(gap_wdata),
+	.m_axi_wstrb(gap_wstrb),
+	.m_axi_wlast(gap_wlast),
+	.m_axi_bvalid(m_axi_fo_gmem_bvalid),
+	.m_axi_bready(gap_bready),
+	.m_axi_bresp(m_axi_fo_gmem_bresp),
+	.done(gap_done)
     );
 
     wire read_master_weights_data_valid;
@@ -241,6 +386,53 @@ module vla_accel_top #(
     wire write_master_fmap_data_valid;
     wire write_master_fmap_data_ready;
     wire hbm_fwrite_done;
+
+    wire fm_output_awvalid;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] fm_output_awaddr;
+    wire [7:0]  fm_output_awlen;
+    wire [2:0]  fm_output_awsize;
+    wire [1:0]  fm_output_awburst;
+    wire fm_output_wvalid;
+    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] fm_output_wdata;
+    wire [C_M_AXI_GMEM_DATA_WIDTH/8-1:0] fm_output_wstrb;
+    wire fm_output_wlast;
+    wire fm_output_bready;
+
+    // DEBUG Signals:
+    (* MARK_DEBUG = "true" *) wire [3:0] is_current_state = instr_scheduler_inst.instruction_scheduler_state;
+    (* MARK_DEBUG = "true" *) wire [3:0] tm_current_state = tile_manager_inst.tile_manager_state;
+    (* MARK_DEBUG = "true" *) wire awvalid = m_axi_fo_gmem_awvalid;
+    (* MARK_DEBUG = "true" *) wire wvalid = m_axi_fo_gmem_wvalid;
+    (* MARK_DEBUG = "true" *) wire wready = m_axi_fo_gmem_wready;
+    (* MARK_DEBUG = "true" *) wire wlast = m_axi_fo_gmem_wlast;
+
+
+    assign m_axi_fo_gmem_awvalid = fm_output_awvalid | memcpy_awvalid | gap_awvalid;
+    assign m_axi_fo_gmem_awaddr  = memcpy_awvalid ? memcpy_awaddr : 
+	    			   gap_awvalid    ? gap_awaddr    : 
+				   fm_output_awaddr;
+    assign m_axi_fo_gmem_awlen   = memcpy_awvalid ? memcpy_awlen  : 
+	    			   gap_awvalid    ? gap_awlen     :
+				   fm_output_awlen;
+    assign m_axi_fo_gmem_awsize  = memcpy_awvalid ? memcpy_awsize : 
+	    			   gap_awvalid    ? gap_awsize    : 
+				   fm_output_awsize;
+    assign m_axi_fo_gmem_awburst = memcpy_awvalid ? memcpy_awburst : 
+	    			   gap_awvalid    ? gap_awburst    :
+				   fm_output_awburst;
+
+    assign m_axi_fo_gmem_wvalid  = fm_output_wvalid | memcpy_wvalid | gap_wvalid;
+    assign m_axi_fo_gmem_wdata   = memcpy_wvalid ? memcpy_wdata : 
+	    			   gap_wvalid    ? gap_wdata    :
+				   fm_output_wdata;
+    assign m_axi_fo_gmem_wstrb   = memcpy_wvalid ? memcpy_wstrb : 
+	    			   gap_wvalid    ? gap_wstrb    :
+				   fm_output_wstrb;
+    assign m_axi_fo_gmem_wlast   = memcpy_wvalid ? memcpy_wlast :
+	    			   gap_wvalid    ? gap_wlast    :
+				   fm_output_wlast;
+    assign m_axi_fo_gmem_bready  = fm_output_bready | memcpy_bready | gap_bready;
+
     burst_axi_write_master #(
 	.AXI_ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
 	.AXI_DATA_WIDTH(C_M_AXI_GMEM_DATA_WIDTH)
@@ -253,36 +445,51 @@ module vla_accel_top #(
 	.data_in(write_master_fmap_data_in),
 	.data_valid(write_master_fmap_data_valid),
 	.data_ready(write_master_fmap_data_ready),
-	.m_axi_awvalid(m_axi_fo_gmem_awvalid),
+	.m_axi_awvalid(fm_output_awvalid),
 	.m_axi_awready(m_axi_fo_gmem_awready),
-	.m_axi_awaddr(m_axi_fo_gmem_awaddr),
-	.m_axi_awlen(m_axi_fo_gmem_awlen),
-	.m_axi_awsize(m_axi_fo_gmem_awsize),
-	.m_axi_awburst(m_axi_fo_gmem_awburst),
-	.m_axi_wvalid(m_axi_fo_gmem_wvalid),
+	.m_axi_awaddr(fm_output_awaddr),
+	.m_axi_awlen(fm_output_awlen),
+	.m_axi_awsize(fm_output_awsize),
+	.m_axi_awburst(fm_output_awburst),
+	.m_axi_wvalid(fm_output_wvalid),
 	.m_axi_wready(m_axi_fo_gmem_wready),
-	.m_axi_wdata(m_axi_fo_gmem_wdata),
-	.m_axi_wstrb(m_axi_fo_gmem_wstrb),
-	.m_axi_wlast(m_axi_fo_gmem_wlast),
+	.m_axi_wdata(fm_output_wdata),
+	.m_axi_wstrb(fm_output_wstrb),
+	.m_axi_wlast(fm_output_wlast),
 	.m_axi_bvalid(m_axi_fo_gmem_bvalid),
-	.m_axi_bready(m_axi_fo_gmem_bready),
+	.m_axi_bready(fm_output_bready),
 	.m_axi_bresp(m_axi_fo_gmem_bresp),
 	.done(hbm_fwrite_done)
     );
 
-    wire tm_start, tm_done;
-    wire [15:0] img_width, img_height, img_channels;
-    wire [15:0] out_channels;
-    wire [4:0] quant_shift;
-    wire is_conv;
+    wire exec_start;
+    wire tm_start = (is_memcpy | is_gap) ? 0 : exec_start;
+    wire tm_done;
+    wire memcpy_start = is_memcpy ? exec_start : 0;
+    wire gap_start = is_gap ? exec_start : 0;
+    wire exec_done  = is_memcpy ? memcpy_done  : 
+	    	      is_gap    ? gap_done     :
+		      tm_done;
     wire [63:0] sched_fetch_addr = heap_base_addr + sched_araddr;
 
-    assign m_axi_gmem_arvalid = sched_arvalid | feat_arvalid;
-    assign m_axi_gmem_araddr = sched_arvalid ? sched_fetch_addr : hbm_read_addr;
-    assign m_axi_gmem_arlen   = sched_arvalid ? sched_arlen  : feat_arlen;
-    assign m_axi_gmem_arsize  = sched_arvalid ? sched_arsize : feat_arsize;
-    assign m_axi_gmem_arburst = sched_arvalid ? sched_arburst : feat_arburst;
-    assign m_axi_gmem_rready  = sched_rready | feat_rready;
+    assign m_axi_gmem_arvalid = sched_arvalid | feat_arvalid | memcpy_arvalid | gap_arvalid;
+    assign m_axi_gmem_araddr = sched_arvalid ? sched_fetch_addr :
+	    		       feat_arvalid ? hbm_fm_read_addr :
+			       gap_arvalid ? gap_araddr :
+			       hbm_vec_read_addr;
+    assign m_axi_gmem_arlen   = sched_arvalid ? sched_arlen  : 
+	    			feat_arvalid ? feat_arlen :
+				gap_arvalid ? gap_arlen :
+				memcpy_arlen;
+    assign m_axi_gmem_arsize  = sched_arvalid ? sched_arsize : 
+	    			feat_arvalid ? feat_arsize :
+				gap_arvalid ? gap_arsize :
+				memcpy_arsize;
+    assign m_axi_gmem_arburst = sched_arvalid ? sched_arburst :
+	    			feat_arvalid ? feat_arburst :
+				gap_arvalid ? gap_arburst :
+				memcpy_arburst;
+    assign m_axi_gmem_rready  = sched_rready | feat_rready | memcpy_rready | gap_rready;
 
     wire relu_en;
     wire [1:0] stride;
@@ -299,7 +506,8 @@ module vla_accel_top #(
 	.clk(ap_clk),
 	.rst_n(ap_rst_n),
 	.start(start_process_internal),
-	.base_addr(64'd0),
+	// .base_addr(64'd0),
+	.base_addr(heap_base_addr),
 	.done(process_done_internal),
 
 	.m_axi_arvalid(sched_arvalid),
@@ -312,8 +520,8 @@ module vla_accel_top #(
 	.m_axi_rready(sched_rready),
 	.m_axi_rdata(m_axi_gmem_rdata),
 
-	.tm_start(tm_start),
-	.tm_done(tm_done),
+	.exec_start(exec_start),
+	.exec_done(exec_done),
 	.cfg_input_addr(cfg_input_offset),
 	.cfg_output_addr(cfg_output_offset),
 	.cfg_weight_addr(cfg_weight_offset),
@@ -323,6 +531,8 @@ module vla_accel_top #(
 	.cfg_out_channels(out_channels),
 	.cfg_quant_shift(quant_shift),
 	.cfg_is_conv(is_conv),
+	.cfg_is_memcpy(is_memcpy),
+	.cfg_is_gap(is_gap),
 	.cfg_relu_en(relu_en),
 	.cfg_stride(stride),
 	.cfg_flatten(flatten),
@@ -381,7 +591,7 @@ module vla_accel_top #(
 	// FMap HBM interface	
 	.hbm_data_in(read_master_data_out),
 	.hbm_addr(hbm_input_addr_w),
-	.hbm_ren(hbm_read_start),
+	.hbm_ren(hbm_read_fm_start),
 	.hbm_rvalid(read_master_data_valid),
 	// Weights HBM interface
 	.hbm_data_in_w(read_master_weights_data_out),

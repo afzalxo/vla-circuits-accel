@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 module conv_controller #(
-    parameter MAX_IMG_WIDTH = 128,
+    parameter MAX_IMG_WIDTH = 256,
     parameter IC_PAR = 16,
     parameter LATENCY = 2 + $clog2(IC_PAR)
 )(

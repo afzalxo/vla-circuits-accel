@@ -73,10 +73,18 @@ module output_dma #(
                 reg signed [ACCUM_WIDTH-1:0] acc_val;
                 reg signed [ACCUM_WIDTH-1:0] shifted_val;
                 reg signed [DATA_WIDTH-1:0] final_val;
+
+		reg signed [ACCUM_WIDTH:0] biased_acc;
+		reg signed [ACCUM_WIDTH-1:0] bias;
+		bias = (quant_shift > 0) ? (1 << (quant_shift - 1)) : 0;
                 
                 acc_val = r_raw_uram_data[((p*OC_PAR + o)*ACCUM_WIDTH) +: ACCUM_WIDTH];
                 if (relu_en && acc_val[ACCUM_WIDTH-1]) acc_val = 0;
-                shifted_val = acc_val >>> quant_shift;
+
+		biased_acc = $signed(acc_val) + $signed({1'b0, bias});
+
+                // shifted_val = acc_val >>> quant_shift;
+                shifted_val = biased_acc >>> quant_shift;
                 
                 if (shifted_val > 127) final_val = 8'd127;
                 else if (shifted_val < -128) final_val = -8'd128;
@@ -107,10 +115,16 @@ module output_dma #(
     localparam S_QUANTIZE    = 12;
     localparam S_LATCH_RAW   = 13;
     
+    
+    
     reg [3:0] output_dma_state;
     reg [15:0] word_cnt;      
     reg [7:0] input_pixel_cnt;
     reg [3:0] flat_chunk_idx;
+
+    // DEBUG Signals:
+    (* MARK_DEBUG = "true" *) wire [3:0] odma_state = output_dma_state;
+
 
     (* max_fanout = 50 *) reg raw_data_en;
     
@@ -267,9 +281,12 @@ module output_dma #(
                 end
                 
                 S_PROCESS: begin
+		    if (write_valid && !write_ready) begin
+                         output_dma_state <= S_PROCESS;
+                    end else begin
                     if (flatten) begin
                         // --- FLATTEN MODE ---
-                        if (write_ready || !write_valid) begin
+                        // if (write_ready || !write_valid) begin
                             if (input_pixel_cnt < r_valid_pixels_per_strip) begin
                                 if (flat_chunk_idx == 0) begin
                                     write_data <= {{(HBM_DATA_WIDTH - BITS_PER_PIXEL_BLOCK){1'b0}}, 
@@ -299,47 +316,62 @@ module output_dma #(
                                     output_dma_state <= S_READ_URAM;
                                 end
                             end
-                        end
+                        // end
                     end else begin
                         // --- STANDARD MODE (Gearbox) ---
                         if (gearbox_fill_level >= HBM_DATA_WIDTH) begin
-                            if (write_ready || !write_valid) begin
+                            // if (write_ready || !write_valid) begin
                                 write_data <= gearbox_buffer[0 +: HBM_DATA_WIDTH];
                                 write_valid <= 1;
                                 gearbox_buffer <= (gearbox_buffer >> HBM_DATA_WIDTH);
                                 gearbox_fill_level <= gearbox_fill_level - HBM_DATA_WIDTH;
-                            end
+                            // end
                         end else begin
+			    write_valid <= 0;
                             if (word_cnt == r_total_uram_words - 1) begin
                                 if (gearbox_fill_level > 0) begin
                                     output_dma_state <= S_FLUSH;
                                 end else begin
-                                    write_valid <= 0;
+                                    // write_valid <= 0;  // TODO
                                     output_dma_state <= S_WAIT_DONE;
                                 end
                             end else begin
                                 word_cnt <= word_cnt + 1;
                                 uram_addr <= uram_addr + 1;
                                 uram_ren <= 1;
-                                write_valid <= 0;
+                                // write_valid <= 0;  // TODO
                                 output_dma_state <= S_READ_URAM;
                             end
                         end
-                    end
+		    end
+	    	    end
                 end
                 
                 S_FLUSH: begin
-                    if (write_ready || !write_valid) begin
+		    if (write_valid && !write_ready) begin //TODO
+			output_dma_state <= S_FLUSH;
+		    end else begin
+                    // if (write_ready || !write_valid) begin
                         write_data <= gearbox_buffer[0 +: HBM_DATA_WIDTH];
                         write_valid <= 1;
                         gearbox_fill_level <= 0;
                         output_dma_state <= S_WAIT_DONE;
-                    end
+                    // end
+		    end
                 end
                 
                 S_WAIT_DONE: begin
-                    if (write_ready) write_valid <= 0;
-                    if (write_done) output_dma_state <= S_DONE;
+		    if (write_valid && write_ready) begin
+                        write_valid <= 1'b0;
+                    end
+		    if (write_done) begin
+			write_data <= 0;
+                        write_valid <= 1'b0;
+                        output_dma_state <= S_DONE;
+                    end
+
+                    // if (write_ready) write_valid <= 0;
+                    // if (write_done) output_dma_state <= S_DONE;
                 end
                 
                 S_DONE: begin

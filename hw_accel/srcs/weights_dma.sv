@@ -48,13 +48,16 @@ module weights_dma #(
     reg done_r;
     assign done = done_r;
     
+    // DEBUG Signals
+    (* MARK_DEBUG = "true" *) wire [1:0] debug_state = state;
+    (* MARK_DEBUG = "true" *) wire [15:0] debug_beat_count = beat_count;
     // Each tile has 3 x 3 IC_PAR x OC_PAR weights and weights are stored as:
     // [OC/OC_PAR][IC/IC_PAR][9][OC_PAR][IC_PAR] in HBM
     // Calculate start index for the current tile at [oc_tile][ic_tile]
-    wire [15:0] kernel_size = is_conv ? 9 : 1;
-    wire [15:0] tile_start_index = ic_tile * (kernel_size * OC_PAR * IC_PAR / (HBM_DATA_WIDTH / 8)) + 
-	    		 	   oc_tile * ((ic / IC_PAR) * kernel_size * OC_PAR * IC_PAR / (HBM_DATA_WIDTH / 8));
-    assign weight_words = kernel_size * OC_PAR * IC_PAR / (HBM_DATA_WIDTH / 8); // Per tile (3x3xOC_PARxIC_PAR)
+    wire [31:0] kernel_size = is_conv ? 9 : 1;
+    wire [31:0] tile_start_index = ic_tile * ((kernel_size * OC_PAR * IC_PAR) / (HBM_DATA_WIDTH / 8)) + 
+	    		 	   oc_tile * (((ic / IC_PAR) * kernel_size * OC_PAR * IC_PAR) / (HBM_DATA_WIDTH / 8));
+    assign weight_words = (kernel_size * OC_PAR * IC_PAR) / (HBM_DATA_WIDTH / 8); // Per tile (3x3xOC_PARxIC_PAR)
     // Need BEATS_PER_KERNEL_PIXEL words per kernel pixel
 
     always @(posedge clk or negedge rst_n) begin

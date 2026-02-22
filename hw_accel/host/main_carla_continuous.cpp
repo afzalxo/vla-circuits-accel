@@ -6,6 +6,9 @@
 #include <fstream>
 #include <iomanip>
 #include <cstring>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
 
 #include "srcs/globals.hpp"
 #include "srcs/packing.hpp"
@@ -142,28 +145,8 @@ int main(int argc, char **argv) {
     /*
     */
 
-    // A. Input Feature Map
-    std::vector<uint8_t> raw_input;
-    load_bin("fpga_data_carla/input_vision.bin", raw_input);
-    std::vector<uint8_t> extra_features;
-    load_bin("fpga_data_carla/extra_features.bin", extra_features);
-    
-    std::vector<int8_t> extra_features_signed(extra_features.begin(), extra_features.end());
-    std::vector<int8_t> packed_extra_features = pad_vector_for_hw(extra_features_signed);
-
     size_t L0_INP_FMAP_SIZE = layers[0].in_w * layers[0].in_h * 
                                   ((layers[0].in_c + IC_PAR - 1) / IC_PAR) * IC_PAR;
-    size_t heap_size = INSTR_SECTION_SIZE + L0_INP_FMAP_SIZE + 
-		       packed_extra_features.size();
-    std::vector<uint8_t, aligned_allocator<uint8_t>> host_heap(heap_size);
-
-    // Pack Input into Heap
-    pack_feature_map<uint8_t>(raw_input.data(), host_heap.data() + INSTR_SECTION_SIZE, 
-                              layers[0].in_h, layers[0].in_w, layers[0].in_c, 
-                              TILE_HEIGHT, IC_PAR);
-    for (size_t i = 0; i < packed_extra_features.size(); ++i) {
-	host_heap[INSTR_SECTION_SIZE + L0_INP_FMAP_SIZE + i] = packed_extra_features[i];
-    }
     // B. Weights (Stack all layers)
     size_t total_weight_size = 0;
     for (const auto& layer : layers) {
@@ -271,21 +254,6 @@ int main(int argc, char **argv) {
 	instr.is_sparse = 0;
 	instr.ic_tile_mask = 0xFFFFFFFF;
 	instr.oc_tile_mask = 0xFFFFFFFF;
-	/*
-	if (i == 0) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x00000001;
-	} else if (i == 1) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x00000001;
-	} else if (i == 2) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x0000000F;
-	}
-	*/
         // Update state for next layer
         prev_bank = out_bank;
         prev_stride = layer.stride;
@@ -293,12 +261,15 @@ int main(int argc, char **argv) {
 
     instr_list[layers.size()].opcode = OP_HALT;
 
+    size_t heap_size = INSTR_SECTION_SIZE + L0_INP_FMAP_SIZE + 
+		       EXTRA_FEATURES_BYTES * 128;
+    std::vector<uint8_t, aligned_allocator<uint8_t>> host_heap(heap_size);
     std::cout << "Size of NISA instruction struct (in bytes): " << sizeof(NISA_Instruction) << std::endl;
     std::cout << "Length of instruction list: " << instr_list.size() << std::endl;
     std::cout << "Length of layers list: " << layers.size() << std::endl;
     // Copy to Heap
     memcpy(host_heap.data(), instr_list.data(), sizeof(NISA_Instruction) * instr_list.size());
-
+    
     // OpenCL routines
     cl_int err;
     auto devices = xcl::get_xil_devices();
@@ -308,64 +279,134 @@ int main(int argc, char **argv) {
     cl::Program::Binaries bins = xcl::import_binary_file(argv[1]);
     OCL_CHECK(err, cl::Program program(context, {device}, bins, NULL, &err));
     OCL_CHECK(err, cl::Kernel kernel(program, "vla_accel_top:{vla_accel_top_0}", &err));
-    // wait_for_enter("\nPress ENTER to continue after setting up ILA trigger...");
-    OCL_CHECK(err, cl::Buffer d_heap(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, heap_size, host_heap.data(), &err));
     OCL_CHECK(err, cl::Buffer d_buf_a(context, CL_MEM_READ_WRITE, max_fmap_size, NULL, &err));
     OCL_CHECK(err, cl::Buffer d_buf_b(context, CL_MEM_READ_WRITE, max_fmap_size, NULL, &err));
     OCL_CHECK(err, cl::Buffer d_wgt(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, total_weight_size, host_weights.data(), &err));
 
-    kernel.setArg(0, d_heap);
     kernel.setArg(1, d_wgt);
     kernel.setArg(2, d_buf_a);
     kernel.setArg(3, d_buf_b);
 
-    std::cout << "INFO: Running Kernel..." << std::endl;
-    q.enqueueTask(kernel);
-    q.finish();
+    int server_fd, client_fd;
+    struct sockaddr_in address;
+    int opt = 1;
+    int addrlen = sizeof(address);
 
-    std::cout << "INFO: Verifying Last Layer Output..." << std::endl;
-    
-    // Determine where the final output is
-    // Logic matches the loop: L0->BufA(1), L1->BufB(2), L2->BufA(1)...
-    // Odd layers (1, 3) -> BufA. Even layers (2, 4) -> BufB.
-    cl::Buffer* final_buf = ((layers.size() - 1) % 2 != 0) ? &d_buf_a : &d_buf_b;
-    
-    auto& last_layer = layers.back();
-    size_t out_bytes = 0;
-    if (last_layer.opcode == OP_CONV || last_layer.opcode == OP_GEMM) {
-        int out_w_padded = ((last_layer.in_w / last_layer.stride) + PP_PAR - 1) / PP_PAR * PP_PAR;
-        int out_ch_padded = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR;
-        out_bytes = out_w_padded * 
-                    (last_layer.in_h / last_layer.stride) * 
-                    out_ch_padded;
+    std::vector<uint8_t> image_buffer(IMG_SIZE_BYTES);
+    std::vector<uint8_t> extra_features(EXTRA_FEATURES_BYTES, 0);
+    InferenceRequest req;
+    InferenceResponse res;
+
+    // 1. Create Socket
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(COMM_PORT);
+
+    // Place image and extra features recv code here
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 3);
+    std::cout << "N-ISA Server listening on port " << COMM_PORT << "..." << std::endl;
+
+    client_fd = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+    std::cout << "CARLA Client connected!" << std::endl;
+
+    bool conn_closed = false;
+    while (!conn_closed) {
+
+        recv(client_fd, &req, sizeof(InferenceRequest), 0);
+	if (req.terminate == 1) {
+	    conn_closed = true;
+	    std::cout << "Termination signal received. Closing connection." << std::endl;
+	    close(client_fd);
+	    close(server_fd);
+	    continue;
+	}
+
+        size_t bytes_received = 0;
+        while (bytes_received < IMG_SIZE_BYTES) {
+                int r = recv(client_fd, image_buffer.data() + bytes_received, IMG_SIZE_BYTES - bytes_received, 0);
+                if (r <= 0) {
+                    close(client_fd);
+            	    close(server_fd);
+            	    std::cout << "Connection closed while receiving image data." << std::endl;
+		    conn_closed = true;
+		    break;
+                }
+                bytes_received += r;
+        }
+        while (bytes_received < IMG_SIZE_BYTES + EXTRA_FEATURES_BYTES) {
+                int r = recv(client_fd, extra_features.data() + (bytes_received - IMG_SIZE_BYTES), 
+            		 EXTRA_FEATURES_BYTES - (bytes_received - IMG_SIZE_BYTES), 0);
+                if (r <= 0) {
+            	close(client_fd);
+            	close(server_fd);
+            	std::cout << "Connection closed while receiving extra features." << std::endl;
+		conn_closed = true;
+		break;
+                }
+                bytes_received += r;
+        }
+        /*for (size_t i = 0; i < 30; ++i) {
+            std::cout << "Received byte " << i << ": " << (int)image_buffer[i] << std::endl;
+        }*/
+
+        std::vector<int8_t> extra_features_signed(extra_features.begin(), extra_features.end());
+        std::vector<int8_t> packed_extra_features = pad_vector_for_hw(extra_features_signed);
+
+        // Pack Input into Heap
+        pack_feature_map<uint8_t>(image_buffer.data(), host_heap.data() + INSTR_SECTION_SIZE, 
+                                  layers[0].in_h, layers[0].in_w, layers[0].in_c, 
+                                  TILE_HEIGHT, IC_PAR);
+        for (size_t i = 0; i < packed_extra_features.size(); ++i) {
+            host_heap[INSTR_SECTION_SIZE + L0_INP_FMAP_SIZE + i] = packed_extra_features[i];
+        }
+
+        OCL_CHECK(err, cl::Buffer d_heap(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, heap_size, host_heap.data(), &err));
+
+        kernel.setArg(0, d_heap);
+        std::cout << "INFO: Running Kernel..." << std::endl;
+        q.enqueueTask(kernel);
+        q.finish();
+        std::cout << "INFO: Verifying Last Layer Output..." << std::endl;
+        
+        cl::Buffer* final_buf = ((layers.size() - 1) % 2 != 0) ? &d_buf_a : &d_buf_b;
+        auto& last_layer = layers.back();
+        size_t out_bytes = 0;
+        if (last_layer.opcode == OP_CONV || last_layer.opcode == OP_GEMM) {
+            int out_w_padded = ((last_layer.in_w / last_layer.stride) + PP_PAR - 1) / PP_PAR * PP_PAR;
+            int out_ch_padded = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR;
+            out_bytes = out_w_padded * 
+                        (last_layer.in_h / last_layer.stride) * 
+                        out_ch_padded;
+        }
+        if (last_layer.opcode == OP_MEMCPY) {
+            out_bytes = (vision_features + 128) * PP_PAR;
+        }
+        if (last_layer.opcode == OP_GAP) {
+            out_bytes = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR * PP_PAR;
+        }
+        std::cout << "Output Bytes to Read: " << out_bytes << std::endl;
+
+        std::vector<int8_t> hw_results(out_bytes);
+        q.enqueueReadBuffer(*final_buf, CL_TRUE, 0, out_bytes, hw_results.data());
+
+        std::cout << "Raw output values: " << (int32_t)(hw_results[0]) << ", " << (int32_t)(hw_results[1]) << std::endl;
+        res.steer = std::tanh(hw_results[0] / OUTPUT_SCALE);
+        res.accel = std::tanh(hw_results[1] / OUTPUT_SCALE);
+
+        send(client_fd, &res, sizeof(InferenceResponse), 0);
     }
-    // if (last_layer.opcode == OP_GEMM) {
-	// out_bytes *= PP_PAR;
-    // }
-    if (last_layer.opcode == OP_MEMCPY) {
-	out_bytes = (vision_features + 128) * PP_PAR;
+
+    // if client_fd and server_fd have not been closed in the recv loop, close them here
+    if (client_fd > 0) {
+	close(client_fd);
+	std::cout << "Client connection closed." << std::endl;
     }
-    if (last_layer.opcode == OP_GAP) {
-	out_bytes = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR * PP_PAR;
+    if (server_fd > 0) {
+	close(server_fd);
+	std::cout << "Server socket closed." << std::endl;
     }
-    std::cout << "Output Bytes to Read: " << out_bytes << std::endl;
-
-    std::vector<int8_t> hw_results(out_bytes);
-    q.enqueueReadBuffer(*final_buf, CL_TRUE, 0, out_bytes, hw_results.data());
-
-    int errors = 0;
-    if (last_layer.opcode == OP_CONV) {
-        errors = verify_output(hw_results, last_layer.golden_file, 
-                                   last_layer.in_h, last_layer.in_w, last_layer.out_c, 
-                                   last_layer.stride, 0);
-    } else if (last_layer.opcode == OP_MEMCPY) {
-	errors = verify_gap_output(hw_results, last_layer.golden_file, vision_features + 128);
-    } else {
-    	errors = verify_gap_output(hw_results, last_layer.golden_file, last_layer.out_c);
-    }
-
-    if (errors == 0) std::cout << "TEST PASSED!" << std::endl;
-    else std::cout << "TEST FAILED with " << errors << " errors." << std::endl;
-
-    return (errors == 0) ? 0 : 1;
 }

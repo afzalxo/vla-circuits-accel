@@ -35,22 +35,22 @@ ipx::add_register CTRL [ipx::get_address_blocks reg0 -of_objects [ipx::get_memor
 set_property address_offset 0x00 [ipx::get_registers CTRL -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 32 [ipx::get_registers CTRL -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 
-set_property address_offset 0x14 [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property address_offset 0x10 [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 64 [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property value m_axi_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers heap_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
-set_property address_offset 0x1c [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property address_offset 0x18 [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 64 [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property value m_axi_fo_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers buff_a_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
-set_property address_offset 0x24 [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property address_offset 0x20 [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 64 [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property value m_axi_fo_gmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers buff_b_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]
 
-set_property address_offset 0x2c [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
+set_property address_offset 0x28 [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property size 64 [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 ipx::add_register_parameter ASSOCIATED_BUSIF [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]
 set_property value m_axi_wgmem [ipx::get_register_parameters ASSOCIATED_BUSIF -of_objects [ipx::get_registers weights_addr -of_objects [ipx::get_address_blocks reg0 -of_objects [ipx::get_memory_maps s_axi_control -of_objects [ipx::current_core]]]]]

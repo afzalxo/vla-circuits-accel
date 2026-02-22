@@ -105,6 +105,9 @@ module tiled_dma #(
     reg [7:0] uram_beat_count;
     reg done_reg;
     assign done = done_reg;
+
+    // DEBUG signals:
+    (* MARK_DEBUG = "true" *) wire [3:0] tiled_dma_state_debug = tiled_dma_state;
     
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

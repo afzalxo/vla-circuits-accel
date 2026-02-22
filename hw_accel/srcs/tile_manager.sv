@@ -5,7 +5,7 @@ module tile_manager #(
     parameter OC_PAR = 16,
     parameter PP_PAR = 8,
     parameter DATA_WIDTH = 8,
-    parameter MAX_IMG_WIDTH = 128,
+    parameter MAX_IMG_WIDTH = 256,
     parameter TILE_HEIGHT = 4, // Height of strip to process per pass
     parameter GMEM_DATA_WIDTH = 512,
     parameter ACC_WIDTH = 28,
@@ -134,6 +134,10 @@ module tile_manager #(
     reg [15:0] stream_ptr;
     reg [15:0] stream_ptr_ulimit;
     reg [15:0] out_ptr;
+
+    // Debug Signals:
+    (* MARK_DEBUG = "true" *) wire [3:0] out_dma_current_state = out_dma.output_dma_state;
+    (* MARK_DEBUG = "true" *) wire [3:0] tiled_dma_current_state = dma.tiled_dma_state;
 
     reg [3:0] tile_manager_state;
 

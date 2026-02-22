@@ -53,14 +53,14 @@ module vla_accel_control_s_axi #(
     // Custom Registers for Arguments
     // localparam ADDR_NUM_SAMPLES_DATA = 8'h10;
 
-    localparam ADDR_FEAT_INPUT_ADDR_LO   = 8'h14;
-    localparam ADDR_FEAT_INPUT_ADDR_HI   = 8'h18;
-    localparam ADDR_BUFF_A_ADDR_LO  = 8'h1C;
-    localparam ADDR_BUFF_A_ADDR_HI  = 8'h20;
-    localparam ADDR_BUFF_B_ADDR_LO  = 8'h24;
-    localparam ADDR_BUFF_B_ADDR_HI  = 8'h28;
-    localparam ADDR_WEIGHT_INPUT_ADDR_LO = 8'h2C;
-    localparam ADDR_WEIGHT_INPUT_ADDR_HI = 8'h30;
+    localparam ADDR_FEAT_INPUT_ADDR_LO   = 8'h10;
+    localparam ADDR_FEAT_INPUT_ADDR_HI   = 8'h14;
+    localparam ADDR_BUFF_A_ADDR_LO  = 8'h18;
+    localparam ADDR_BUFF_A_ADDR_HI  = 8'h1C;
+    localparam ADDR_BUFF_B_ADDR_LO  = 8'h20;
+    localparam ADDR_BUFF_B_ADDR_HI  = 8'h24;
+    localparam ADDR_WEIGHT_INPUT_ADDR_LO = 8'h28;
+    localparam ADDR_WEIGHT_INPUT_ADDR_HI = 8'h2C;
 
     // AXI Write FSM States
     localparam WRIDLE = 2'd0, WRDATA = 2'd1, WRRESP = 2'd2, WRRESET = 2'd3;

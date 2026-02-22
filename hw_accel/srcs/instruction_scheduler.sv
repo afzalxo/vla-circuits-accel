@@ -26,8 +26,8 @@ module instruction_scheduler #(
     input wire [DATA_WIDTH-1:0] m_axi_rdata,
     
     // --- Tile Manager Control Interface ---
-    output reg tm_start,
-    input wire tm_done,
+    output reg exec_start,
+    input wire exec_done,
     
     // --- Configuration Outputs (Driven to Tile Manager) ---
     (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_input_addr,
@@ -39,6 +39,8 @@ module instruction_scheduler #(
     output reg [15:0] cfg_out_channels,
     (* max_fanout = 20 *) output reg [4:0]  cfg_quant_shift,
     output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
+    output reg	      cfg_is_memcpy,
+    output reg	      cfg_is_gap,
     (* max_fanout = 20 *) output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_stride,
     output reg 	      cfg_flatten,
@@ -75,10 +77,11 @@ module instruction_scheduler #(
     wire [7:0] opcode = instr_reg[263:256];
 
     // Opcode Definitions
-    localparam OP_CONV  = 8'h01;
-    localparam OP_GEMM = 8'h02;
+    localparam OP_CONV   = 8'h01;
+    localparam OP_GEMM   = 8'h02;
     localparam OP_MEMCPY = 8'h03;
-    localparam OP_HALT  = 8'hFF;
+    localparam OP_GAP    = 8'h04;
+    localparam OP_HALT   = 8'hFF;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -87,7 +90,7 @@ module instruction_scheduler #(
             m_axi_arvalid <= 0;
             m_axi_rready <= 0;
             m_axi_araddr <= 0;
-            tm_start <= 0;
+            exec_start <= 0;
             pc <= 0;
 	    cc_counter <= 0;
             // Config defaults
@@ -100,6 +103,8 @@ module instruction_scheduler #(
             cfg_out_channels <= 0;
             cfg_quant_shift <= 0;
             cfg_is_conv <= 0;
+	    cfg_is_memcpy <= 0;
+	    cfg_is_gap <= 0;
 	    cfg_relu_en <= 0;
 	    cfg_input_bank <= 0;
 	    cfg_output_bank <= 0;
@@ -107,7 +112,7 @@ module instruction_scheduler #(
 	    cfg_flatten <= 0;
         end else begin
             // Default Pulses
-            tm_start <= 0;
+            exec_start <= 0;
             done <= 0;
 	    cc_counter <= cc_counter + 1;
             case (instruction_scheduler_state)
@@ -168,27 +173,33 @@ module instruction_scheduler #(
                     cfg_in_channels  <= instr_reg[239:224];
                     cfg_out_channels <= instr_reg[255:240];
                     
-		    cfg_input_bank  	 <= instr_reg[273:272];
-		    cfg_output_bank 	 <= instr_reg[275:274];
-		    cfg_relu_en     	 <= instr_reg[280];
-		    cfg_stride      	 <= instr_reg[289:288];
+		    cfg_input_bank  	     <= instr_reg[273:272];
+		    cfg_output_bank 	     <= instr_reg[275:274];
+		    cfg_relu_en     	     <= instr_reg[280];
+		    cfg_stride      	     <= instr_reg[289:288];
 		    cfg_log2_mem_tile_height <= instr_reg[298:296];
-		    cfg_flatten          <= instr_reg[304];
-		    cfg_is_sparse   	 <= instr_reg[312];
-		    cfg_ic_tile_mask     <= instr_reg[351:320];
-		    cfg_oc_tile_mask     <= instr_reg[383:352];
+		    cfg_flatten              <= instr_reg[304];
+		    cfg_is_sparse   	     <= instr_reg[312];
+		    cfg_ic_tile_mask         <= instr_reg[351:320];
+		    cfg_oc_tile_mask         <= instr_reg[383:352];
 
                     // Opcode Check
                     if (opcode == OP_HALT) begin
 			cfg_is_conv <= 0;
+			cfg_is_gap <= 0;
+			cfg_is_memcpy <= 0;
 			cfg_quant_shift <= 0;
                         instruction_scheduler_state <= S_DONE;
                     end else if (opcode == OP_CONV) begin
-                        cfg_is_conv <= (opcode == OP_CONV);
+                        cfg_is_conv <= 1;
+			cfg_is_gap <= 0;
+			cfg_is_memcpy <= 0;
 			cfg_quant_shift <= instr_reg[268:264];
                         instruction_scheduler_state <= S_EXECUTE;
 		    end else if (opcode == OP_GEMM) begin
 			cfg_is_conv <= 0;
+			cfg_is_gap <= 0;
+			cfg_is_memcpy <= 0;
 			cfg_img_width <= instr_reg[207:192];
 			cfg_img_height <= 16'd1;
 			cfg_stride <= 2'b01;
@@ -196,6 +207,17 @@ module instruction_scheduler #(
 			instruction_scheduler_state <= S_EXECUTE;
 		    end else if (opcode == OP_MEMCPY) begin
 			cfg_is_conv <= 0;
+			cfg_is_gap <= 0;
+			cfg_is_memcpy <= 1;
+			instruction_scheduler_state <= S_EXECUTE;
+			cfg_in_channels <= 0;
+			cfg_img_height <= 0;
+			cfg_img_width <= 0;
+		    end else if (opcode == OP_GAP) begin 
+			cfg_is_conv <= 0;
+			cfg_is_memcpy <= 0;
+			cfg_is_gap <= 1;
+			cfg_quant_shift <= instr_reg[268:264];
 			instruction_scheduler_state <= S_EXECUTE;
 		    end else begin
 			$display("ERROR: Unknown Opcode %h at PC %h", opcode, pc);
@@ -205,13 +227,13 @@ module instruction_scheduler #(
 
                 // 4. Execute Layer
                 S_EXECUTE: begin
-                    tm_start <= 1; // Pulse start to Tile Manager
+                    exec_start <= 1;
                     instruction_scheduler_state <= S_WAIT_TM;
                 end
 
                 // 5. Wait for Layer Completion
                 S_WAIT_TM: begin
-                    if (tm_done) begin
+                    if (exec_done) begin
                         instruction_scheduler_state <= S_NEXT_INSTR;
                     end
                 end
@@ -224,11 +246,7 @@ module instruction_scheduler #(
 
                 S_DONE: begin
                     done <= 1;
-                    // Wait for reset or new start
-                    if (start) begin
-                        pc <= base_addr;
-                        instruction_scheduler_state <= S_FETCH_REQ;
-                    end
+		    instruction_scheduler_state <= S_IDLE;
                 end
             endcase
         end

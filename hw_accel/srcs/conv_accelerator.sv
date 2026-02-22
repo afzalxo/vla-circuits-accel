@@ -5,7 +5,7 @@ module conv_accelerator #(
     parameter OC_PAR = 16,
     parameter PP_PAR = 8,
     parameter DATA_WIDTH = 8,
-    parameter MAX_IMG_WIDTH = 128
+    parameter MAX_IMG_WIDTH = 256
 )(
     input wire clk,
     input wire rst_n,
