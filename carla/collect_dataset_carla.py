@@ -11,7 +11,20 @@ import gc
 import math
 from tqdm import tqdm
 import wandb
-sys.path.append("/home/eeafzal/carla_simulator/PythonAPI/carla") 
+from carla_utils.traffic_utils import spawn_traffic, reset_vehicle
+from carla_utils.route_utils import set_traffic_lights_time
+# from carla_utils.visualization_utils import draw_full_diagnostic
+
+CARLA_UE_VERSION = 4  # I think 5 isnt fesible for various reasons: doesnt support weather, no tesla model 3 that we have been using in UE4 version, and the physics are too different that the compute_smooth_control function doesnt work.
+
+
+if CARLA_UE_VERSION == 4:
+    sys.path.append("/home/eeafzal/carla_simulator/PythonAPI/carla") 
+elif CARLA_UE_VERSION == 5:
+    sys.path.append("/home/eeafzal/carla_ue5/Carla-0.10.0-Linux-Shipping/PythonAPI/carla")
+else:
+    raise Exception("Unsupported CARLA version. Please set CARLA_UE_VERSION to 4 or 5.")
+
 from agents.navigation.global_route_planner import GlobalRoutePlanner
 from agents.navigation.local_planner import RoadOption
 from agents.navigation.basic_agent import BasicAgent
@@ -22,20 +35,20 @@ CURRENT_SCENARIO = "DYNAMIC"
 N_VEHICLES = 40
 N_WALKERS = 40
 
-OUTPUT_DIR = f"carla_dataset_{CURRENT_SCENARIO.lower()}"
+OUTPUT_DIR = f"carla_ue{CARLA_UE_VERSION}_dataset_{CURRENT_SCENARIO.lower()}"
 IMG_DIR = os.path.join(OUTPUT_DIR, "images")
 CSV_PATH = os.path.join(OUTPUT_DIR, "data.csv")
 
 USE_WANDB = True
 WANDB_PROJECT = "vla-accel"
-WANDB_SAVE_VIDEO_PROB = 0.1
+WANDB_SAVE_VIDEO_PROB = 0.05
 
 TOTAL_FRAMES = 400000 
 SKIP_FIRST_N_FRAMES = 120
-RENDER_SIZE = (512, 512)
+RENDER_SIZE = (1920, 1080)
 SAVE_SIZE = 256
 FOV = 110
-SAVE_INTERVAL = 5000 
+SAVE_INTERVAL = 2000 
 
 CAM_Y_OFFSET = 0.4
 CAM_YAW = 25.0
@@ -57,93 +70,6 @@ perturb_steer = 0.0
 
 # Seed random
 random.seed(56)
-
-
-def spawn_traffic(world, client, n_vehicles, n_walkers):
-    """Spawns NPCs and Walkers for the Dynamic Scenario."""
-    print(f"Spawning Traffic: {n_vehicles} Vehicles, {n_walkers} Walkers...")
-    actor_list = []
-    vehicle_list = []
-    walker_list = []
-    
-    # 1. Setup Traffic Manager
-    tm = client.get_trafficmanager(8000)
-    tm.set_synchronous_mode(True)
-    tm.set_hybrid_physics_mode(False) 
-    # tm.set_hybrid_physics_radius(70.0)
-    tm.global_percentage_speed_difference(30.0)
-    tm.set_global_distance_to_leading_vehicle(3)
-
-    # 2. Spawn Vehicles
-    bp_lib = world.get_blueprint_library()
-    vehicle_bps = bp_lib.filter('vehicle.*')
-    vehicle_bps = [x for x in vehicle_bps if int(x.get_attribute('number_of_wheels')) == 4]
-    spawn_points = world.get_map().get_spawn_points()
-    
-    # Randomly shuffle spawn points
-    random.shuffle(spawn_points)
-    
-    for i in range(min(n_vehicles, len(spawn_points))):
-        bp = random.choice(vehicle_bps)
-        if bp.has_attribute('color'):
-            color = random.choice(bp.get_attribute('color').recommended_values)
-            bp.set_attribute('color', color)
-        
-        # Set autopilot
-        bp.set_attribute('role_name', 'autopilot')
-        spawn_point = spawn_points[i]
-        spawn_point.location.z += 0.3
-        
-        try:
-            v = world.spawn_actor(bp, spawn_point)
-            v.set_autopilot(True, tm.get_port())
-            tm.ignore_lights_percentage(v, 0) # Obey lights
-            tm.auto_lane_change(v, True)
-            actor_list.append(v)
-            vehicle_list.append(v)
-        except:
-            pass
-            
-    # 3. Spawn Walkers
-    # Walkers need a controller + the actual walker actor
-    walker_bp = bp_lib.filter("walker.pedestrian.*")
-    controller_bp = bp_lib.find('controller.ai.walker')
-    
-    spawn_points = []
-    for _ in range(n_walkers):
-        loc = world.get_random_location_from_navigation()
-        if loc: spawn_points.append(carla.Transform(loc))
-    
-    for spawn_point in spawn_points:
-        try:
-            bp = random.choice(walker_bp)
-            walker = world.spawn_actor(bp, spawn_point)
-            controller = world.spawn_actor(controller_bp, carla.Transform(), attach_to=walker)
-            
-            # Start walking
-            controller.start()
-            controller.go_to_location(world.get_random_location_from_navigation())
-            controller.set_max_speed(1.4 + random.random()) # Random speed
-            
-            actor_list.append(walker)
-            actor_list.append(controller)
-            walker_list.append(walker)
-        except:
-            pass
-
-    print(f"Spawned {len(vehicle_list)} Vehicles and {len(walker_list)} Walkers.")
-    return actor_list
-
-def reset_vehicle(vehicle, map_data):
-    """Teleports vehicle to a random valid spawn point and clears velocity."""
-    spawn_points = map_data.get_spawn_points()
-    spawn_point = random.choice(spawn_points)
-    vehicle.set_transform(spawn_point)
-    vehicle.set_target_velocity(carla.Vector3D(0, 0, 0))
-    vehicle.set_target_angular_velocity(carla.Vector3D(0, 0, 0))
-    # Give the physics engine a moment to settle
-    return spawn_point
-
 
 def draw_full_diagnostic(img_bgr, model, cmd):
     h, w = img_bgr.shape[:2]
@@ -373,6 +299,7 @@ class BEVVisualizer:
             
         camera.destroy()
         return array
+
 
 def compute_smooth_control(vehicle, route, target_speed_kmh, hazard_detected):
     control = carla.VehicleControl()
@@ -632,12 +559,13 @@ def main():
     map_data = world.get_map()
     grp = GlobalRoutePlanner(map_data, sampling_resolution=2.0)
     
+    traffic_actors = []
     is_rainy = 0
     is_crowded = 0
     if CURRENT_SCENARIO == "WEATHER":
         # Heavy Rain, Wet Roads
         weather = carla.WeatherParameters.HardRainNoon
-        weather.fog_density = 10.0 # Add some fog for extra noise
+        weather.fog_density = 10.0
         weather.wetness = 100.0
         world.set_weather(weather)
         is_rainy = 1
@@ -650,12 +578,11 @@ def main():
     
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05 # 10 FPS simulation step
+    settings.fixed_delta_seconds = 0.05
     settings.substepping = True
     settings.max_substep_delta_time = 0.01
     settings.max_substeps = 10
     world.apply_settings(settings)
-
 
     actor_list = []
     data_buffer = []
@@ -671,8 +598,9 @@ def main():
 
     try:
         bp_lib = world.get_blueprint_library()
-        vehicle = world.spawn_actor(bp_lib.find('vehicle.tesla.model3'), 
-                                    random.choice(map_data.get_spawn_points()))
+        vehicle_bp = bp_lib.find('vehicle.tesla.model3')
+        ego_spawn = random.choice(map_data.get_spawn_points())
+        vehicle = world.spawn_actor(vehicle_bp, ego_spawn) 
         actor_list.append(vehicle)
         
         cam_bp = bp_lib.find('sensor.camera.rgb')
@@ -753,17 +681,7 @@ def main():
         col_sensor.listen(col_queue.put)
         actor_list.append(col_sensor)
 
-
-        actor_list_tl = world.get_actors().filter('traffic.traffic_light*')
-        for actor in actor_list_tl:
-                actor.set_red_time(2.0)
-                actor.set_green_time(15.0)
-                actor.set_yellow_time(3.0)
-                actor.set_state(carla.TrafficLightState.Green) 
-                actor.freeze(True)
-                actor.freeze(False)
-
-        print(f"Updated {len(actor_list_tl)} traffic lights.")
+        set_traffic_lights_time(world)
 
         # Variable to track how long we've been stopped
         stuck_timer = 0
@@ -910,7 +828,7 @@ def main():
             elif state == STATE_PERTURB:
                 drift_control = carla.VehicleControl(
                     steer=perturb_steer, 
-                    throttle=0.4, # Keep moving
+                    throttle=0.14, # 0.3,
                     brake=0.0,
                     manual_gear_shift=False
                 )
@@ -1028,12 +946,14 @@ def main():
                 # wandb_array_l = array_l.copy()
                 # wandb_array_r = array_r.copy()
             # Center crop to square
+            '''
             ah, aw = array.shape[:2]
             side = min(ah, aw)
             start_x = (aw - side) // 2
             start_y = (ah - side) // 2
             array = array[start_y:start_y+side, start_x:start_x+side]
             array = array.copy()
+            '''
             array = cv2.resize(array, (SAVE_SIZE, SAVE_SIZE), interpolation=cv2.INTER_AREA)
 
             if THIRD_PERSON_CAM:
@@ -1122,7 +1042,7 @@ def main():
     finally:
         if len(data_buffer) > 0:
             save_chunk(data_buffer, CSV_PATH, is_first_chunk)
-        if traffic_actors:
+        if traffic_actors is not None:
             print("Cleaning up traffic actors...")
             client.apply_batch([carla.command.DestroyActor(x) for x in traffic_actors])
         for actor in actor_list: 

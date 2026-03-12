@@ -71,18 +71,43 @@ void pack_weights(const T* src, T* dst, int OC, int IC, int OC_PAR_HW, int IC_PA
     }
 }
 
+template <typename T1, typename T2>
+void pack_biases(const T1* src, T2* dst, int OC, int OC_PAR_HW) {
+    int num_oc_tiles = (OC + OC_PAR_HW - 1) / OC_PAR_HW;
+    int dst_idx = 0;
+
+    size_t src_type_size = sizeof(T1);
+    size_t dst_type_size = sizeof(T2);
+    size_t conversion_factor = src_type_size / dst_type_size;
+    // Nominally, conversion_factor would be 4. I need to pack 1 int32_t bias into 4 int8_t slots. All 4 slots are utilized.
+    for (int t_oc = 0; t_oc < num_oc_tiles; ++t_oc) {
+	for (int p_oc = 0; p_oc < OC_PAR_HW; ++p_oc) {
+	    int global_oc = (t_oc * OC_PAR_HW) + p_oc;
+	    if (global_oc >= OC) {
+		dst[dst_idx++] = 0;
+	    } else {
+		// dst[dst_idx++] = src[global_oc];
+		T1 bias_value = src[global_oc];
+		for (size_t i = 0; i < conversion_factor; ++i) {
+		    dst[dst_idx++] = (bias_value >> (8 * i)) & 0xFF;
+		}
+	    }
+	}
+    }
+}
+
 std::vector<int8_t> pad_vector_for_hw(const std::vector<int8_t>& input) {
     // We assume input size is a multiple of 16 (IC_PAR)
     int num_units = input.size() / 16;
     
     // Each unit becomes a 128-byte strip (16 valid + 112 zero)
-    std::vector<int8_t> padded(num_units * 128, 0);
+    std::vector<int8_t> padded(num_units * 64, 0);
     
     for (int i = 0; i < num_units; ++i) {
         // Copy 16 bytes of valid data
         // Dest Index: i * 128
         // Src Index: i * 16
-        memcpy(&padded[i * 128], &input[i * 16], 16);
+        memcpy(&padded[i * 64], &input[i * 16], 16);
         
         // The remaining 112 bytes are already 0 initialized
     }

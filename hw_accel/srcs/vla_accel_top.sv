@@ -129,6 +129,7 @@ module vla_accel_top #(
     wire [63:0] cfg_input_offset;
     wire [63:0] cfg_output_offset;
     wire [63:0] cfg_weight_offset;
+    wire [63:0] cfg_bias_offset;
 
     wire [15:0] img_width, img_height, img_channels;
     wire [15:0] out_channels;
@@ -136,11 +137,14 @@ module vla_accel_top #(
     wire is_conv;
     wire is_memcpy;
     wire is_gap;
+    wire bias_en;
 
     wire [63:0] base_hbm0 = heap_base_addr;
     wire [63:0] base_hbm1 = hbm_reg_a_addr;
     wire [63:0] base_hbm2 = hbm_reg_b_addr;
     wire [63:0] base_hbm3 = hbm_weight_input_addr_base;
+
+    wire [1:0] wb_dma_active;
 
     wire [63:0] current_input_base  = (cfg_input_bank  == 2'b00) ? base_hbm0 :
 	    			      (cfg_input_bank  == 2'b01) ? base_hbm1 :
@@ -153,8 +157,14 @@ module vla_accel_top #(
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_vec_read_addr;
 
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_fm_read_addr = current_input_base + cfg_input_offset + (hbm_input_addr_w << 6);  // * 64 since data width is 512 bits = 64 bytes per burst
+
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_winput_addr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_binput_addr;
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_b_addr = hbm_weight_input_addr_base + cfg_bias_offset + (hbm_binput_addr << 6);
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_w_addr = hbm_weight_input_addr_base + cfg_weight_offset + (hbm_winput_addr << 6);
+    wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_read_wb_addr = (wb_dma_active == 2'b01) ? hbm_read_w_addr :
+	    						  (wb_dma_active == 2'b10) ? hbm_read_b_addr : 64'd0;
+
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] hbm_write_f_addr = current_output_base + cfg_output_offset + (hbm_foutput_addr << 6);
 
     wire [C_M_AXI_GMEM_ADDR_WIDTH-1:0] memcpy_awaddr;
@@ -201,10 +211,12 @@ module vla_accel_top #(
     );
 
     wire read_master_data_valid;
+    wire read_master_rready;
     wire hbm_read_fm_start;
     wire hbm_load_done;
     wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] read_master_data_out;
     wire [15:0] feature_map_words;
+    wire feat_data_ready;
 
     burst_axi_read_master #(
 	.AXI_ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -213,8 +225,9 @@ module vla_accel_top #(
         .clk(ap_clk),
         .rst_n(ap_rst_n),
         .start(hbm_read_fm_start),
+	// .cmd_ready(cmd_ready),
+	// .data_ready(feat_data_ready),
 	.base_address(hbm_fm_read_addr),
-
         .m_axi_arvalid(feat_arvalid),
         .m_axi_arready(m_axi_gmem_arready),
         .m_axi_araddr(feat_araddr),
@@ -228,6 +241,7 @@ module vla_accel_top #(
 
 	.total_words_to_read(feature_map_words),
         .data_valid(read_master_data_valid),
+	.data_ready(read_master_rready),
         .data_out(read_master_data_out),
         .done(hbm_load_done)
     );
@@ -350,12 +364,20 @@ module vla_accel_top #(
 	.done(gap_done)
     );
 
-    wire read_master_weights_data_valid;
+    wire read_master_wb_data_valid;
     wire hbm_wread_start;
-    wire hbm_wload_done;
+    wire hbm_bread_start;
+    wire hbm_wb_read_start = (wb_dma_active == 2'b01) ? hbm_wread_start :
+	    		     (wb_dma_active == 2'b10) ? hbm_bread_start : 1'b0;
+    wire hbm_wb_load_done;
     wire hbm_fwrite_start;
-    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] read_master_weights_data_out;
+    wire [C_M_AXI_GMEM_DATA_WIDTH-1:0] read_master_wb_data_out;
     wire [15:0] weight_words;
+    wire [15:0] bias_words;
+    wire [15:0] wb_words = (wb_dma_active == 2'b01) ? weight_words :
+	    	    	   (wb_dma_active == 2'b10) ? bias_words : 16'd0;
+
+    wire cmd_ready;
 
     burst_axi_read_master #(
 	.AXI_ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -363,8 +385,10 @@ module vla_accel_top #(
     ) hbm_weights_read_master_inst (
         .clk(ap_clk),
         .rst_n(ap_rst_n),
-        .start(hbm_wread_start),
-	.base_address(hbm_read_w_addr),
+        .start(hbm_wb_read_start),
+	// .cmd_ready(),
+	// .data_ready(1'b1),
+	.base_address(hbm_read_wb_addr),
         .m_axi_arvalid(m_axi_wgmem_arvalid),
         .m_axi_arready(m_axi_wgmem_arready),
         .m_axi_araddr(m_axi_wgmem_araddr),
@@ -375,10 +399,11 @@ module vla_accel_top #(
         .m_axi_rready(m_axi_wgmem_rready),
         .m_axi_rdata(m_axi_wgmem_rdata),
         .m_axi_rlast(m_axi_wgmem_rlast),
-	.total_words_to_read(weight_words),
-        .data_valid(read_master_weights_data_valid),
-        .data_out(read_master_weights_data_out),
-        .done(hbm_wload_done)
+	.total_words_to_read(wb_words),
+        .data_valid(read_master_wb_data_valid),
+	.data_ready(1'b1),
+        .data_out(read_master_wb_data_out),
+        .done(hbm_wb_load_done)
     );
 
     wire [15:0] output_feature_map_words;
@@ -398,15 +423,7 @@ module vla_accel_top #(
     wire fm_output_wlast;
     wire fm_output_bready;
 
-    // DEBUG Signals:
-    (* MARK_DEBUG = "true" *) wire [3:0] is_current_state = instr_scheduler_inst.instruction_scheduler_state;
-    (* MARK_DEBUG = "true" *) wire [3:0] tm_current_state = tile_manager_inst.tile_manager_state;
-    (* MARK_DEBUG = "true" *) wire awvalid = m_axi_fo_gmem_awvalid;
-    (* MARK_DEBUG = "true" *) wire wvalid = m_axi_fo_gmem_wvalid;
-    (* MARK_DEBUG = "true" *) wire wready = m_axi_fo_gmem_wready;
-    (* MARK_DEBUG = "true" *) wire wlast = m_axi_fo_gmem_wlast;
-
-
+    /*
     assign m_axi_fo_gmem_awvalid = fm_output_awvalid | memcpy_awvalid | gap_awvalid;
     assign m_axi_fo_gmem_awaddr  = memcpy_awvalid ? memcpy_awaddr : 
 	    			   gap_awvalid    ? gap_awaddr    : 
@@ -432,6 +449,7 @@ module vla_accel_top #(
 	    			   gap_wvalid    ? gap_wlast    :
 				   fm_output_wlast;
     assign m_axi_fo_gmem_bready  = fm_output_bready | memcpy_bready | gap_bready;
+    */
 
     burst_axi_write_master #(
 	.AXI_ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -474,7 +492,7 @@ module vla_accel_top #(
 
     assign m_axi_gmem_arvalid = sched_arvalid | feat_arvalid | memcpy_arvalid | gap_arvalid;
     assign m_axi_gmem_araddr = sched_arvalid ? sched_fetch_addr :
-	    		       feat_arvalid ? hbm_fm_read_addr :
+	    		       feat_arvalid ? feat_araddr :  //hbm_fm_read_addr :
 			       gap_arvalid ? gap_araddr :
 			       hbm_vec_read_addr;
     assign m_axi_gmem_arlen   = sched_arvalid ? sched_arlen  : 
@@ -495,9 +513,136 @@ module vla_accel_top #(
     wire [1:0] stride;
     wire [2:0] log2_mem_tile_height;
     wire is_sparse;
-    wire [31:0] ic_tile_mask;
-    wire [31:0] oc_tile_mask;
+    wire [127:0] ic_tile_mask;
+    wire [127:0] oc_tile_mask;
     wire flatten;
+
+//////////////
+    reg[31:0] total_cycles;
+    reg [31:0] compute_cycles;
+    reg[31:0] memory_cycles;
+    
+    wire mem_active = m_axi_gmem_arvalid | m_axi_gmem_rvalid | 
+                      m_axi_wgmem_arvalid | m_axi_wgmem_rvalid | 
+                      m_axi_fo_gmem_awvalid | m_axi_fo_gmem_wvalid;
+                      
+    wire acc_start_top = tile_manager_inst.acc_start;
+    wire acc_done_top  = tile_manager_inst.acc_done;
+    reg acc_active;
+    
+    always @(posedge ap_clk or negedge ap_rst_n) begin
+        if (!ap_rst_n) acc_active <= 0;
+        else if (acc_start_top) acc_active <= 1;
+        else if (acc_done_top) acc_active <= 0;
+    end
+
+    always @(posedge ap_clk or negedge ap_rst_n) begin
+        if (!ap_rst_n) begin
+            total_cycles <= 0;
+            compute_cycles <= 0;
+            memory_cycles <= 0;
+        end else begin
+            if (start_process_internal) begin
+                total_cycles <= 0;
+                compute_cycles <= 0;
+                memory_cycles <= 0;
+            end else if (!ap_idle) begin
+                total_cycles <= total_cycles + 1;
+                if (acc_active) compute_cycles <= compute_cycles + 1;
+                if (mem_active) memory_cycles <= memory_cycles + 1;
+            end
+        end
+    end
+
+    // --- FSM to dump performance counters at end of processing ---
+    localparam PERF_IDLE = 0, PERF_AW = 1, PERF_W = 2, PERF_B = 3;
+    reg [1:0] perf_state;
+    reg perf_awvalid_reg;
+    reg perf_wvalid_reg;
+    reg perf_bready_reg;
+    reg top_done;
+    wire sched_done;
+    
+    always @(posedge ap_clk or negedge ap_rst_n) begin
+        if (!ap_rst_n) begin
+            perf_state <= PERF_IDLE;
+            perf_awvalid_reg <= 0;
+            perf_wvalid_reg <= 0;
+            perf_bready_reg <= 0;
+            top_done <= 0;
+        end else begin
+            top_done <= 0; // one cycle pulse
+            case (perf_state)
+                PERF_IDLE: begin
+                    if (sched_done) begin
+                        perf_awvalid_reg <= 1;
+                        perf_state <= PERF_AW;
+                    end
+                end
+                PERF_AW: begin
+                    if (perf_awvalid_reg && m_axi_fo_gmem_awready) begin
+                        perf_awvalid_reg <= 0;
+                        perf_wvalid_reg <= 1;
+                        perf_state <= PERF_W;
+                    end
+                end
+                PERF_W: begin
+                    if (perf_wvalid_reg && m_axi_fo_gmem_wready) begin
+                        perf_wvalid_reg <= 0;
+                        perf_bready_reg <= 1;
+                        perf_state <= PERF_B;
+                    end
+                end
+                PERF_B: begin
+                    if (perf_bready_reg && m_axi_fo_gmem_bvalid) begin
+                        perf_bready_reg <= 0;
+                        top_done <= 1;
+                        perf_state <= PERF_IDLE;
+                    end
+                end
+            endcase
+        end
+    end
+    
+    assign process_done_internal = top_done;
+
+    // Hardcoded to write into the last 64 bytes of Buf A (256 * 256 * 64 - 64)
+    wire[C_M_AXI_GMEM_ADDR_WIDTH-1:0] perf_awaddr = hbm_reg_a_addr + 32'd4194240;
+
+    assign m_axi_fo_gmem_awvalid = fm_output_awvalid | memcpy_awvalid | gap_awvalid | perf_awvalid_reg;
+    assign m_axi_fo_gmem_awaddr  = perf_awvalid_reg ? perf_awaddr :
+                                   memcpy_awvalid ? memcpy_awaddr : 
+	    			   gap_awvalid    ? gap_awaddr    : 
+				   fm_output_awaddr;
+    assign m_axi_fo_gmem_awlen   = perf_awvalid_reg ? 8'd0 :
+                                   memcpy_awvalid ? memcpy_awlen  : 
+	    			   gap_awvalid    ? gap_awlen     :
+				   fm_output_awlen;
+    assign m_axi_fo_gmem_awsize  = perf_awvalid_reg ? 3'b110 :
+                                   memcpy_awvalid ? memcpy_awsize : 
+	    			   gap_awvalid    ? gap_awsize    : 
+				   fm_output_awsize;
+    assign m_axi_fo_gmem_awburst = perf_awvalid_reg ? 2'b01 :
+                                   memcpy_awvalid ? memcpy_awburst : 
+	    			   gap_awvalid    ? gap_awburst    :
+				   fm_output_awburst;
+
+    assign m_axi_fo_gmem_wvalid  = fm_output_wvalid | memcpy_wvalid | gap_wvalid | perf_wvalid_reg;
+    assign m_axi_fo_gmem_wdata   = perf_wvalid_reg ? { 384'd0, 32'hDEADBEEF, memory_cycles, compute_cycles, total_cycles } :
+                                   memcpy_wvalid ? memcpy_wdata : 
+	    			   gap_wvalid    ? gap_wdata    :
+				   fm_output_wdata;
+    assign m_axi_fo_gmem_wstrb   = perf_wvalid_reg ? 64'hFFFFFFFFFFFFFFFF :
+                                   memcpy_wvalid ? memcpy_wstrb : 
+	    			   gap_wvalid    ? gap_wstrb    :
+				   fm_output_wstrb;
+    assign m_axi_fo_gmem_wlast   = perf_wvalid_reg ? 1'b1 :
+                                   memcpy_wvalid ? memcpy_wlast :
+	    			   gap_wvalid    ? gap_wlast    :
+				   fm_output_wlast;
+    assign m_axi_fo_gmem_bready  = fm_output_bready | memcpy_bready | gap_bready | perf_bready_reg;
+
+//////////////
 
     instruction_scheduler #(
 	.ADDR_WIDTH(C_M_AXI_GMEM_ADDR_WIDTH),
@@ -506,9 +651,8 @@ module vla_accel_top #(
 	.clk(ap_clk),
 	.rst_n(ap_rst_n),
 	.start(start_process_internal),
-	// .base_addr(64'd0),
 	.base_addr(heap_base_addr),
-	.done(process_done_internal),
+	.done(sched_done),  //process_done_internal),
 
 	.m_axi_arvalid(sched_arvalid),
 	.m_axi_arready(m_axi_gmem_arready),
@@ -525,6 +669,7 @@ module vla_accel_top #(
 	.cfg_input_addr(cfg_input_offset),
 	.cfg_output_addr(cfg_output_offset),
 	.cfg_weight_addr(cfg_weight_offset),
+	.cfg_bias_addr(cfg_bias_offset),
 	.cfg_img_width(img_width),
 	.cfg_img_height(img_height),
 	.cfg_in_channels(img_channels),
@@ -533,6 +678,7 @@ module vla_accel_top #(
 	.cfg_is_conv(is_conv),
 	.cfg_is_memcpy(is_memcpy),
 	.cfg_is_gap(is_gap),
+	.cfg_bias_en(bias_en),
 	.cfg_relu_en(relu_en),
 	.cfg_stride(stride),
 	.cfg_flatten(flatten),
@@ -544,7 +690,6 @@ module vla_accel_top #(
 	.cfg_output_bank(cfg_output_bank)
     );
 
-    // wire [15:0] img_width_strips = (img_width < PP_PAR) ? 1 : (img_width + PP_PAR - 1) / PP_PAR;
     (* max_fanout = 20 *) reg [15:0] img_width_strips_reg;
     
     always @(posedge ap_clk) begin
@@ -557,7 +702,6 @@ module vla_accel_top #(
     end
     
     wire [15:0] img_width_strips = img_width_strips_reg;
-
 
     tile_manager #(
 	.IC_PAR(IC_PAR),
@@ -572,18 +716,23 @@ module vla_accel_top #(
 	.rst_n(ap_rst_n),
 	.start(tm_start),
 
+	// .cmd_ready(cmd_ready),
+	// .feat_data_ready(feat_data_ready),
 	.full_img_width_strips(img_width_strips),
+	.full_img_width(img_width),
 	.full_img_height(img_height),
 	.full_img_channels(img_channels),
 	.output_channels(out_channels),
 	.feature_map_words(feature_map_words),
 	.weight_words(weight_words),
+	.bias_words(bias_words),
 	.fmap_out_words(output_feature_map_words),
 	.quant_shift(quant_shift),
 	.relu_en(relu_en),
 	.stride(stride),
 	.flatten(flatten),
 	.is_conv(is_conv),
+	.bias_en(bias_en),
 	.log2_mem_tile_height(log2_mem_tile_height),
 	.is_sparse(is_sparse),
 	.ic_tile_mask(ic_tile_mask),
@@ -593,11 +742,18 @@ module vla_accel_top #(
 	.hbm_addr(hbm_input_addr_w),
 	.hbm_ren(hbm_read_fm_start),
 	.hbm_rvalid(read_master_data_valid),
+	.hbm_rready(read_master_rready),
 	// Weights HBM interface
-	.hbm_data_in_w(read_master_weights_data_out),
+	.hbm_data_in_w(read_master_wb_data_out),
 	.hbm_addr_w(hbm_winput_addr),
 	.hbm_ren_w(hbm_wread_start),
-	.hbm_rvalid_w(read_master_weights_data_valid),
+	.hbm_rvalid_w(read_master_wb_data_valid),
+	// Bias HBM interface
+	.hbm_data_in_b(read_master_wb_data_out),
+	.hbm_addr_b(hbm_binput_addr),
+	.hbm_ren_b(hbm_bread_start),
+	.hbm_rvalid_b(read_master_wb_data_valid),
+	.wb_dma_active(wb_dma_active),
 	// Output FMap HBM interface
 	.hbm_fmap_out_data(write_master_fmap_data_in),
 	.hbm_fmap_out_addr(hbm_foutput_addr),

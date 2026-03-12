@@ -6,9 +6,10 @@ import os
 import random
 from tqdm import tqdm
 
+# wandb.login(key="wandb_v1_I04s9yh1iRNc1kxevYICyn2prgQ")
 wandb.Table.MAX_ARTIFACT_ROWS = 400000
 
-DATASET_DIR = "carla_dataset_weather"
+DATASET_DIR = "carla_ue4_dataset_base"
 CSV_PATH = os.path.join(DATASET_DIR, "data.csv")
 IMG_DIR = os.path.join(DATASET_DIR, "images")
 

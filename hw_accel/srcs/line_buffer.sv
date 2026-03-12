@@ -20,9 +20,9 @@ module line_buffer #(
 
     localparam RAM_DEPTH = MAX_IMG_WIDTH / PP_PAR;
     
-    (* ram_style = "ultra" *)
+    (* ram_style = "distributed" *)
     reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] ram_0 [0:RAM_DEPTH-1];
-    (* ram_style = "ultra" *)
+    (* ram_style = "distributed" *)
     reg signed [PP_PAR-1:0][IC_PAR-1:0][DATA_WIDTH-1:0] ram_1 [0:RAM_DEPTH-1];
     
     (* max_fanout = 20 *) reg [15:0] wr_ptr;

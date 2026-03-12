@@ -69,10 +69,17 @@ module gap_unit #(
     assign m_axi_wstrb = {(HBM_DATA_WIDTH/8){1'b1}};
     assign m_axi_wlast = 1'b1;
 
-    // --- ADDRESS CALCULATION ---
+    /*
     wire [31:0] stride_row_words = img_width / CHUNKS_PER_BEAT;
     wire [31:0] stride_ic_tile_words = stride_row_words << log2_mem_tile_height;
     wire [31:0] stride_height_tile_words = stride_ic_tile_words * (img_channels / IC_PAR);
+    */
+
+    reg [31:0] r_stride_row_words;
+    reg [31:0] r_stride_ic_tile_words;
+    reg [31:0] r_stride_height_tile_words;
+    reg [63:0] tile_oc_offset;
+    reg [63:0] tile_ht_offset;
     
     wire [15:0] num_oc_tiles = img_channels / IC_PAR;
     wire [15:0] num_h_tiles = (img_height + (1 << log2_mem_tile_height) - 1) >> log2_mem_tile_height;
@@ -92,8 +99,12 @@ module gap_unit #(
     localparam S_WRITE_DATA_ACK = 10;
     localparam S_WRITE_RESP = 11;
     localparam S_DONE       = 12;
+    localparam S_CALC_0      = 13;
+    localparam S_CALC_1      = 14;
+    localparam S_CALC_2      = 15;
+    localparam S_CALC_3      = 16;
 
-    reg [3:0] state;
+    reg [4:0] state;
     reg [15:0] cnt_oc, cnt_ht, cnt_row, cnt_col;
     (* ram_style = "registers" *) reg signed [31:0] acc [0:IC_PAR-1];
     reg [63:0] curr_read_addr;
@@ -139,6 +150,9 @@ module gap_unit #(
             cnt_oc <= 0;
 	    beat_cntr <= 0;
             write_beat_cnt <= 0;
+	    r_stride_row_words <= 0;
+	    r_stride_ic_tile_words <= 0;
+	    r_stride_height_tile_words <= 0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -157,9 +171,32 @@ module gap_unit #(
                 S_INIT_TILE: begin
 		    for (i = 0; i < IC_PAR; i = i + 1) begin acc[i] <= 0; end
                     cnt_ht <= 0; cnt_row <= 0; cnt_col <= 0;
-                    curr_read_addr <= src_addr_base + (cnt_oc * stride_ic_tile_words * 64);
-                    state <= S_READ_REQ;
+                    // curr_read_addr <= src_addr_base + (cnt_oc * stride_ic_tile_words * 64);
+                    // state <= S_READ_REQ;
+		    state <= S_CALC_0;
                 end
+
+		S_CALC_0: begin
+		    r_stride_row_words <= (img_width / CHUNKS_PER_BEAT);
+		    r_stride_ic_tile_words <= (img_width / CHUNKS_PER_BEAT) << log2_mem_tile_height;
+		    state <= S_CALC_1;
+		end
+
+		S_CALC_1: begin
+		    r_stride_height_tile_words <= r_stride_ic_tile_words * (img_channels / IC_PAR);
+		    tile_oc_offset <= cnt_oc * r_stride_ic_tile_words * 64;
+		    state <= S_CALC_2;
+		end
+
+		S_CALC_2: begin
+		    tile_ht_offset <= cnt_ht * r_stride_height_tile_words * 64;
+		    state <= S_CALC_3;
+		end
+
+		S_CALC_3: begin
+		    curr_read_addr <= src_addr_base + tile_oc_offset + tile_ht_offset;
+		    state <= S_READ_REQ;
+		end
 
                 // 2. Read Request
                 S_READ_REQ: begin
@@ -211,10 +248,11 @@ module gap_unit #(
                                 state <= S_WRITE_REQ;
                             end else begin
                                 cnt_ht <= cnt_ht + 1;
-                                curr_read_addr <= src_addr_base + 
-                                                  ((cnt_ht + 1) * stride_height_tile_words * 64) + 
-                                                  (cnt_oc * stride_ic_tile_words * 64);
-                                state <= S_READ_REQ;
+                                // curr_read_addr <= src_addr_base + 
+                                //                  ((cnt_ht + 1) * stride_height_tile_words * 64) + 
+                                //                   (cnt_oc * stride_ic_tile_words * 64);
+                                // state <= S_READ_REQ;
+				state <= S_CALC_0;
                             end
                         end else begin
                             cnt_row <= cnt_row + 1;

@@ -28,125 +28,13 @@ int main(int argc, char **argv) {
     }
 
     size_t vision_features = 1024;
-    std::vector<LayerConfig> layers;
-
-    // Layer 0
-    layers.push_back({
-        "Layer 0",
-        256, 256, 3, 32,   // InW, InH, InC, OutC
-        2, 10, true,       // Stride, Shift, ReLU
-	OP_CONV,
-        "fpga_data_carla/weights_conv0.bin",
-        "fpga_data_carla/golden_conv0.bin"
-    });
-
-    // Layer 1
-    layers.push_back({
-        "Layer 1",
-        128, 128, 32, 64,   // Input dims match L0 output
-        2, 10, true,
-	OP_CONV,
-        "fpga_data_carla/weights_conv1.bin",
-        "fpga_data_carla/golden_conv1.bin"
-    });
-
-    // Layer 2
-    layers.push_back({
-	"Layer 2",
-	64, 64, 64, 128,
-	2, 8, true,
-	OP_CONV,
-	"fpga_data_carla/weights_conv2.bin",
-	"fpga_data_carla/golden_conv2.bin"
-    });
-
-    // Layer 3
-    layers.push_back({
-	"Layer 3",
-	32, 32, 128, 256,
-	2, 10, true,
-	OP_CONV,
-	"fpga_data_carla/weights_conv3.bin",
-	"fpga_data_carla/golden_conv3.bin"
-    });
-
-    // Layer 4
-    layers.push_back({
-	"Layer 4",
-	16, 16, 256, 512,
-	2, 9, true,
-	OP_CONV,
-	"fpga_data_carla/weights_conv4.bin",
-	"fpga_data_carla/golden_conv4.bin"
-    });
-
-    // Layer 5
-    layers.push_back({
-	"Layer 5",
-	8, 8, 512, 1024,
-	1, 9, true,
-	OP_CONV,
-	"fpga_data_carla/weights_conv5.bin",
-	"fpga_data_carla/golden_conv5.bin"
-    });
-
-    layers.push_back({
-	"GAP",
-	8, 8, 1024, 1024,
-	1, 6, false,
-	OP_GAP,
-	"",
-	"fpga_data_carla/golden_gap.bin"
-    });
-    
-    layers.push_back({
-	"memcpy",
-	0, 0, 0, 128 * PP_PAR,
-	0, 0, false,
-	OP_MEMCPY,
-	"",
-	"fpga_data_carla/golden_fused_features.bin"
-    });
-    layers.push_back({
-	"fusion",
-	1, 1, 1152, 512,
-	1, 8, true,
-	OP_GEMM,
-	"fpga_data_carla/weights_fusion.bin",
-	"fpga_data_carla/golden_fusion.bin"
-    });
-    layers.push_back({
-	"Branch 0 fc1",
-	1, 1, 512, 256,
-	1, 9, true,
-	OP_GEMM,
-	"fpga_data_carla/weights_fc1.bin",
-	"fpga_data_carla/golden_fc1.bin"
-    });
-    layers.push_back({
-	"Dense 3",
-	1, 1, 256, 256,
-	1, 9, true,
-	OP_GEMM,
-	"fpga_data_carla/weights_fc2.bin",
-	"fpga_data_carla/golden_fc2.bin"
-    });
-    layers.push_back({
-	"Control Head",
-	1, 1, 256, 2,
-	1, 9, false,
-	OP_GEMM,
-	"fpga_data_carla/weights_head.bin",
-	"fpga_data_carla/golden_head.bin"
-    });
-    /*
-    */
+    std::vector<LayerConfig> layers = load_model_specs("model_spec_temp.txt");
 
     // A. Input Feature Map
     std::vector<uint8_t> raw_input;
-    load_bin("fpga_data_carla/input_vision.bin", raw_input);
+    load_bin<uint8_t>("fpga_data_carla/input_vision.bin", raw_input);
     std::vector<uint8_t> extra_features;
-    load_bin("fpga_data_carla/extra_features.bin", extra_features);
+    load_bin<uint8_t>("fpga_data_carla/extra_features.bin", extra_features);
     
     std::vector<int8_t> extra_features_signed(extra_features.begin(), extra_features.end());
     std::vector<int8_t> packed_extra_features = pad_vector_for_hw(extra_features_signed);
@@ -166,6 +54,7 @@ int main(int argc, char **argv) {
     }
     // B. Weights (Stack all layers)
     size_t total_weight_size = 0;
+    size_t total_bias_size = 0;
     for (const auto& layer : layers) {
 	if (layer.opcode == OP_MEMCPY || layer.opcode == OP_GAP) {
 	    continue;
@@ -176,30 +65,39 @@ int main(int argc, char **argv) {
         int ic_pad = (layer.in_c + IC_PAR - 1) / IC_PAR * IC_PAR;
         int oc_pad = (layer.out_c + OC_PAR - 1) / OC_PAR * OC_PAR;
         total_weight_size += oc_pad * ic_pad * kernel_size;
+	total_bias_size += oc_pad * sizeof(BIAS_T);
     }
-    std::vector<uint8_t, aligned_allocator<uint8_t>> host_weights(total_weight_size);
+    std::vector<uint8_t, aligned_allocator<uint8_t>> host_weights(total_weight_size + total_bias_size);
     
     // Pack Weights
     size_t current_weight_offset = 0;
+    size_t current_bias_offset = total_weight_size;
     std::vector<size_t> layer_weight_offsets;
+    std::vector<size_t> layer_bias_offsets;
 
     for (const auto& layer : layers) {
 	if (layer.opcode == OP_MEMCPY) { continue; }
 	if (layer.opcode == OP_GAP) { continue; }
         std::vector<uint8_t> w_raw;
-        load_bin(layer.weight_file, w_raw);
+        load_bin<uint8_t>(layer.weight_file, w_raw);
+	std::vector<uint32_t> b_raw;
+	load_bin<uint32_t>(layer.bias_file, b_raw);
         
         layer_weight_offsets.push_back(current_weight_offset);
+	layer_bias_offsets.push_back(current_bias_offset);
 
 	bool is_1x1 = (layer.stride == 1 && layer.in_h == 1);
 	uint32_t kernel_size = is_1x1 ? 1 : 9;
         
         pack_weights<uint8_t>(w_raw.data(), host_weights.data() + current_weight_offset, 
                               layer.out_c, layer.in_c, OC_PAR, IC_PAR, is_1x1);
+	pack_biases<uint32_t, uint8_t>(b_raw.data(), host_weights.data() + current_bias_offset, 
+				   layer.out_c, OC_PAR);
         
         int ic_pad = (layer.in_c + IC_PAR - 1) / IC_PAR * IC_PAR;
         int oc_pad = (layer.out_c + OC_PAR - 1) / OC_PAR * OC_PAR;
         current_weight_offset += oc_pad * ic_pad * kernel_size;
+	current_bias_offset += oc_pad * sizeof(BIAS_T);
     }
 
     // C. Output Buffers (Max size needed)
@@ -219,10 +117,11 @@ int main(int argc, char **argv) {
         auto& layer = layers[i];
         auto& instr = instr_list[i];
 
+	instr.aux_flags = 0;
         // Determine Banks (Ping-Pong)
         // Input is prev_bank. Output toggles between 1 and 2.
         int in_bank = layer.opcode == OP_MEMCPY ? 0 : prev_bank;
-        int out_bank = layer.opcode == OP_MEMCPY ? 1 :   // TODO: Deal with this for the memcpy case
+        int out_bank = layer.opcode == OP_MEMCPY ? 2 :   // TODO: Deal with this for the memcpy case
 		       (in_bank == 1) ? 2 : 1; 
         
         // Bank Sel Byte: [Output(3:2) | Input(1:0)]
@@ -233,15 +132,22 @@ int main(int argc, char **argv) {
         instr.output_offset = 0;
 	if (layer.opcode == OP_CONV) {
             instr.weight_offset = layer_weight_offsets[i];   // TODO: Deal with this for layers that come after memcpy/gap
+	    instr.aux_flags |= (1 << 3);  // Bias en flag
+	    instr.bias_offset = layer_bias_offsets[i];
 	} else if (layer.opcode == OP_GEMM) {
-	    instr.weight_offset = layer_weight_offsets[i-2];
+	    instr.weight_offset = layer_weight_offsets[i-1];
+	    instr.aux_flags |= (1 << 3);  // Bias flag
+	    instr.bias_offset = layer_bias_offsets[i-1];
 	} else { 
 	    instr.weight_offset = 0;
+	    instr.bias_offset = 0;
 	}
 
+	int hw_width = (layer.in_w < 4) ? 4 : layer.in_w;
+	int hw_height = layer.in_h;
         // Dimensions
-        instr.width = layer.in_w;
-        instr.height = layer.in_h;
+        instr.width = hw_width;
+        instr.height = hw_height;
         // Pad Input Channels for Hardware Loop
         instr.in_channels = (layer.in_c + IC_PAR - 1) / IC_PAR * IC_PAR;
         instr.out_channels = (layer.out_c + OC_PAR - 1) / OC_PAR * OC_PAR;
@@ -261,31 +167,17 @@ int main(int argc, char **argv) {
 	    // Memcpy from INSTR_SECTION_SIZE+L0_FMAP_SIZE 128 bytes to BufA output offset
 	    instr.opcode = OP_MEMCPY;
 	    instr.input_offset = INSTR_SECTION_SIZE + L0_INP_FMAP_SIZE;
-	    instr.output_offset = vision_features * PP_PAR;
+	    instr.output_offset = vision_features * (PP_PAR / 2); //PP_PAR;
 	}
         instr.quant_shift = layer.quant_shift;
-        instr.relu_en = layer.relu ? 1 : 0;
         instr.stride = layer.stride;
+	if (layer.relu)    instr.aux_flags |= (1 << 0);
+	// if (layer.flatten) instr.aux_flags |= (1 << 1);
+	if (layer.is_sparse) instr.aux_flags |= (1 << 2);
+	// if (true) instr.aux_flags |= (1 << 3);  // Bias enabled always for now
 
-	instr.flatten = 0;
-	instr.is_sparse = 0;
-	instr.ic_tile_mask = 0xFFFFFFFF;
-	instr.oc_tile_mask = 0xFFFFFFFF;
-	/*
-	if (i == 0) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x00000001;
-	} else if (i == 1) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x00000001;
-	} else if (i == 2) {
-	   instr.is_sparse = 1;
-	   instr.ic_tile_mask = 0x00000001;
-	   instr.oc_tile_mask = 0x0000000F;
-	}
-	*/
+	instr.oc_tile_mask_hi = layer.oc_tile_mask_hi;
+	instr.oc_tile_mask_lo = layer.oc_tile_mask_lo;
         // Update state for next layer
         prev_bank = out_bank;
         prev_stride = layer.stride;
@@ -312,36 +204,43 @@ int main(int argc, char **argv) {
     OCL_CHECK(err, cl::Buffer d_heap(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, heap_size, host_heap.data(), &err));
     OCL_CHECK(err, cl::Buffer d_buf_a(context, CL_MEM_READ_WRITE, max_fmap_size, NULL, &err));
     OCL_CHECK(err, cl::Buffer d_buf_b(context, CL_MEM_READ_WRITE, max_fmap_size, NULL, &err));
-    OCL_CHECK(err, cl::Buffer d_wgt(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, total_weight_size, host_weights.data(), &err));
+    OCL_CHECK(err, cl::Buffer d_wgt(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, total_weight_size + total_bias_size, host_weights.data(), &err));
 
     kernel.setArg(0, d_heap);
     kernel.setArg(1, d_wgt);
     kernel.setArg(2, d_buf_a);
     kernel.setArg(3, d_buf_b);
 
+    cl::Event kernel_event;
     std::cout << "INFO: Running Kernel..." << std::endl;
-    q.enqueueTask(kernel);
+    q.enqueueTask(kernel, NULL, &kernel_event);
     q.finish();
+
+    uint64_t start_time = kernel_event.getProfilingInfo<CL_PROFILING_COMMAND_START>();
+    uint64_t end_time = kernel_event.getProfilingInfo<CL_PROFILING_COMMAND_END>();
+    double execution_time_ms = (end_time - start_time) / 1000000.0;
+    std::cout << " FPGA Kernel Execution Time: " << std::fixed << std::setprecision(3) << execution_time_ms << " ms" << std::endl;
 
     std::cout << "INFO: Verifying Last Layer Output..." << std::endl;
     
     // Determine where the final output is
     // Logic matches the loop: L0->BufA(1), L1->BufB(2), L2->BufA(1)...
     // Odd layers (1, 3) -> BufA. Even layers (2, 4) -> BufB.
-    cl::Buffer* final_buf = ((layers.size() - 1) % 2 != 0) ? &d_buf_a : &d_buf_b;
+    cl::Buffer* final_buf = ((layers.size()) % 2 != 0) ? &d_buf_a : &d_buf_b;
     
     auto& last_layer = layers.back();
     size_t out_bytes = 0;
     if (last_layer.opcode == OP_CONV || last_layer.opcode == OP_GEMM) {
-        int out_w_padded = ((last_layer.in_w / last_layer.stride) + PP_PAR - 1) / PP_PAR * PP_PAR;
+	int hw_in_w = (last_layer.in_w < 4) ? 4 : last_layer.in_w;
+	int num_strips = (hw_in_w + PP_PAR - 1) / PP_PAR;
+	int eff_pp_par = (last_layer.stride == 2) ? (PP_PAR / 2) : PP_PAR;
+
+        int out_w_padded = num_strips * eff_pp_par; //((last_layer.in_w / last_layer.stride) + PP_PAR - 1) / PP_PAR * PP_PAR;
         int out_ch_padded = ((last_layer.out_c + OC_PAR - 1) / OC_PAR) * OC_PAR;
         out_bytes = out_w_padded * 
                     (last_layer.in_h / last_layer.stride) * 
                     out_ch_padded;
     }
-    // if (last_layer.opcode == OP_GEMM) {
-	// out_bytes *= PP_PAR;
-    // }
     if (last_layer.opcode == OP_MEMCPY) {
 	out_bytes = (vision_features + 128) * PP_PAR;
     }
@@ -353,16 +252,30 @@ int main(int argc, char **argv) {
     std::vector<int8_t> hw_results(out_bytes);
     q.enqueueReadBuffer(*final_buf, CL_TRUE, 0, out_bytes, hw_results.data());
 
+    std::vector<uint32_t> perf_counters(16, 0);
+    q.enqueueReadBuffer(d_buf_a, CL_TRUE, max_fmap_size - 64, 64, perf_counters.data());
+    if (perf_counters[3] == 0xDEADBEEF) {
+        std::cout << "\n=== N-ISA Hardware Performance Counters ===" << std::endl;
+        std::cout << "Total Execution Cycles: " << perf_counters[0] << std::endl;
+        std::cout << "Compute Engine Cycles:  " << perf_counters[1] << std::endl;
+        std::cout << "Memory Wait Cycles:     " << perf_counters[2] << std::endl;
+        std::cout << "===========================================\n" << std::endl;
+    } else {
+        std::cout << "Performance counters missing or overwritten. Magic: 0x" << std::hex << perf_counters[3] << std::dec << std::endl;
+    }
+
     int errors = 0;
     if (last_layer.opcode == OP_CONV) {
         errors = verify_output(hw_results, last_layer.golden_file, 
                                    last_layer.in_h, last_layer.in_w, last_layer.out_c, 
-                                   last_layer.stride, 0);
+                                   last_layer.stride, 0, last_layer.is_sparse, last_layer.oc_tile_mask_lo, last_layer.oc_tile_mask_hi);
     } else if (last_layer.opcode == OP_MEMCPY) {
 	errors = verify_gap_output(hw_results, last_layer.golden_file, vision_features + 128);
     } else {
     	errors = verify_gap_output(hw_results, last_layer.golden_file, last_layer.out_c);
     }
+
+    std::cout << "Raw output values: " << (int32_t)(hw_results[0]) << ", " << (int32_t)(hw_results[1]) << std::endl;
 
     if (errors == 0) std::cout << "TEST PASSED!" << std::endl;
     else std::cout << "TEST FAILED with " << errors << " errors." << std::endl;

@@ -8,6 +8,8 @@ module output_dma #(
     parameter TILE_HEIGHT = 4,
     parameter HBM_DATA_WIDTH = 512,
     parameter ADDR_WIDTH = 64,
+    parameter BIAS_WIDTH = 32,
+    parameter BIAS_BITS_PER_BLOCK = OC_PAR * BIAS_WIDTH,
     parameter URAM_WIDTH = PP_PAR * OC_PAR * ACCUM_WIDTH
 )(
     input wire clk,
@@ -29,6 +31,9 @@ module output_dma #(
     output reg [15:0] uram_addr,
     input wire [URAM_WIDTH-1:0] uram_rdata,
     output reg uram_ren,
+
+    // BIAS Interface
+    input wire [BIAS_BITS_PER_BLOCK-1:0] bias_rdata,
     
     // Interface to burst_axi_write_master
     output reg start_write,
@@ -41,65 +46,10 @@ module output_dma #(
     output reg done
 );
 
-    // 1. Basic Block Sizes
     localparam BITS_PER_PIXEL_BLOCK = OC_PAR * DATA_WIDTH; 
     localparam QUANTIZED_BLOCK_WIDTH = PP_PAR * OC_PAR * DATA_WIDTH;
     localparam CHUNKS_PER_URAM_WORD = (QUANTIZED_BLOCK_WIDTH + HBM_DATA_WIDTH - 1) / HBM_DATA_WIDTH;
 
-    // --- PIPELINE REGISTERS ---
-    reg [15:0] r_out_width;
-    reg [15:0] r_num_w_strips;
-    reg [15:0] r_valid_pixels_per_strip;
-    reg [15:0] r_active_bits_per_strip;
-    reg [31:0] r_global_tile_index;
-    
-    reg [15:0] r_num_oc_tiles;
-    reg [31:0] r_tile_y_stride;
-    reg [31:0] r_words_per_row;
-    reg [15:0] r_total_uram_words;
-    
-    reg [31:0] r_stride_oc_tile_words;
-    
-    // --- QUANTIZATION ---
-    reg [URAM_WIDTH-1:0] r_raw_uram_data;
-    reg [QUANTIZED_BLOCK_WIDTH-1:0] quantized_data;
-    reg [QUANTIZED_BLOCK_WIDTH-1:0] r_quantized_data;
-
-    integer p, o;
-    always @(*) begin
-        quantized_data = 0;
-        for (p = 0; p < PP_PAR; p = p + 1) begin
-            for (o = 0; o < OC_PAR; o = o + 1) begin
-                reg signed [ACCUM_WIDTH-1:0] acc_val;
-                reg signed [ACCUM_WIDTH-1:0] shifted_val;
-                reg signed [DATA_WIDTH-1:0] final_val;
-
-		reg signed [ACCUM_WIDTH:0] biased_acc;
-		reg signed [ACCUM_WIDTH-1:0] bias;
-		bias = (quant_shift > 0) ? (1 << (quant_shift - 1)) : 0;
-                
-                acc_val = r_raw_uram_data[((p*OC_PAR + o)*ACCUM_WIDTH) +: ACCUM_WIDTH];
-                if (relu_en && acc_val[ACCUM_WIDTH-1]) acc_val = 0;
-
-		biased_acc = $signed(acc_val) + $signed({1'b0, bias});
-
-                // shifted_val = acc_val >>> quant_shift;
-                shifted_val = biased_acc >>> quant_shift;
-                
-                if (shifted_val > 127) final_val = 8'd127;
-                else if (shifted_val < -128) final_val = -8'd128;
-                else final_val = shifted_val[DATA_WIDTH-1:0];
-                
-                quantized_data[((p*OC_PAR + o)*DATA_WIDTH) +: DATA_WIDTH] = final_val;
-            end
-        end
-    end
-
-    // --- GEARBOX ---
-    reg [2047:0] gearbox_buffer;
-    reg [15:0] gearbox_fill_level;
-
-    // --- FSM ---
     localparam S_IDLE        = 0;
     localparam S_CALC_1      = 1;
     localparam S_CALC_2      = 2;
@@ -114,36 +64,112 @@ module output_dma #(
     localparam S_DONE        = 11;
     localparam S_QUANTIZE    = 12;
     localparam S_LATCH_RAW   = 13;
+    localparam S_PIPE_WAIT_1   = 14;
+    localparam S_PIPE_WAIT_2   = 15;
+    localparam S_PIPE_WAIT_3   = 16;
     
+    reg [4:0] output_dma_state;
+
+    reg [15:0] r_out_width;
+    reg [15:0] r_num_w_strips;
+    reg [15:0] r_valid_pixels_per_strip;
+    reg [15:0] r_active_bits_per_strip;
+    reg [31:0] r_global_tile_index;
     
+    reg [15:0] r_num_oc_tiles;
+    reg [31:0] r_tile_y_stride;
+    reg [31:0] r_words_per_row;
+    reg [15:0] r_total_uram_words;
     
-    reg [3:0] output_dma_state;
+    reg [31:0] r_stride_oc_tile_words;
+    
+    (* max_fanout = 32 *) reg [URAM_WIDTH-1:0] r_raw_uram_data;
+    (* max_fanout = 32 *) reg [BIAS_BITS_PER_BLOCK-1:0] r_bias_data;
+    reg [QUANTIZED_BLOCK_WIDTH-1:0] quantized_data;
+    reg [QUANTIZED_BLOCK_WIDTH-1:0] r_quantized_data;
+
+    (* max_fanout = 16 *) reg [4:0] quant_shift_repl;
+    (* max_fanout = 32 *) reg relu_en_repl;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            quant_shift_repl <= 0;
+            relu_en_repl <= 0;
+        end else begin
+            quant_shift_repl <= quant_shift;
+            relu_en_repl <= relu_en;
+        end
+    end
+
+    // Stage 1: Post-Model-Bias Sum
+    (* max_fanout = 32 *) reg signed [ACCUM_WIDTH-1:0] s1_acc_plus_mb [0:PP_PAR-1][0:OC_PAR-1];
+    
+    // Stage 2: Post-Rounding-Bias Sum (ReLU applied here)
+    (* max_fanout = 32 *) reg signed [ACCUM_WIDTH:0] s2_biased_acc [0:PP_PAR-1][0:OC_PAR-1];
+    
+    // Helper for Rounding Bias
+    wire signed [ACCUM_WIDTH-1:0] quant_bias = (quant_shift_repl > 0) ? (1 << (quant_shift_repl - 1)) : 0;
+
+    integer pi, oi;
+    (* max_fanout = 20 *) wire raw_data_en = (output_dma_state == S_LATCH_RAW);
+
+    always @ (posedge clk or negedge rst_n) begin
+	if (!rst_n) begin
+	    for (pi = 0; pi < PP_PAR; pi = pi + 1) begin
+		for (oi = 0; oi < OC_PAR; oi = oi + 1) begin
+		    s1_acc_plus_mb[pi][oi] <= 0;
+		    s2_biased_acc[pi][oi] <= 0;
+		end
+	    end
+	    r_quantized_data <= 0;
+	    r_raw_uram_data <= 0;
+	    r_bias_data <= 0;
+	end else begin
+	    if (raw_data_en) begin
+		r_raw_uram_data <= uram_rdata;
+		r_bias_data <= bias_rdata;
+		r_quantized_data <= 0;
+	    end
+	    for (pi = 0; pi < PP_PAR; pi = pi + 1) begin
+		for (oi = 0; oi < OC_PAR; oi = oi + 1) begin
+		    logic signed [BIAS_WIDTH-1:0] model_bias;
+		    model_bias = $signed(r_bias_data[oi * BIAS_WIDTH +: BIAS_WIDTH]);
+		    s1_acc_plus_mb[pi][oi] <= $signed(r_raw_uram_data[((pi*OC_PAR + oi)*ACCUM_WIDTH) +: ACCUM_WIDTH]) 
+					    + $signed(model_bias[ACCUM_WIDTH-1:0]);
+		end
+	    end
+	
+	    for (pi = 0; pi < PP_PAR; pi = pi + 1) begin
+		for (oi = 0; oi < OC_PAR; oi = oi + 1) begin
+		    automatic logic signed [ACCUM_WIDTH-1:0] relu_val;
+		    relu_val = (relu_en_repl && s1_acc_plus_mb[pi][oi][ACCUM_WIDTH-1]) ? 0 : s1_acc_plus_mb[pi][oi];
+		    
+		    s2_biased_acc[pi][oi] <= $signed(relu_val) + $signed({1'b0, quant_bias});
+		end
+	    end
+
+	    for (pi = 0; pi < PP_PAR; pi = pi + 1) begin
+		for (oi = 0; oi < OC_PAR; oi = oi + 1) begin
+		    automatic logic signed [ACCUM_WIDTH-1:0] shifted;
+		    automatic logic signed [DATA_WIDTH-1:0] clamped;
+		    
+		    shifted = s2_biased_acc[pi][oi] >>> quant_shift_repl;
+		    
+		    if (shifted > 127)      clamped = 8'd127;
+		    else if (shifted < -128) clamped = -8'd128;
+		    else                     clamped = shifted[DATA_WIDTH-1:0];
+		    
+		    r_quantized_data[((pi*OC_PAR + oi)*DATA_WIDTH) +: DATA_WIDTH] <= clamped;
+		end
+	    end
+	end
+    end
+
+    reg [2047:0] gearbox_buffer;
+    reg [15:0] gearbox_fill_level;
+
     reg [15:0] word_cnt;      
     reg [7:0] input_pixel_cnt;
     reg [3:0] flat_chunk_idx;
-
-    // DEBUG Signals:
-    (* MARK_DEBUG = "true" *) wire [3:0] odma_state = output_dma_state;
-
-
-    (* max_fanout = 50 *) reg raw_data_en;
-    
-    always @(posedge clk) begin
-        if (!rst_n) raw_data_en <= 0;
-        else begin
-            // Pre-calculate enable for next cycle (S_READ_URAM -> S_LATCH_RAW)
-            // Or just base it on current state if timing allows.
-            // Ideally, register it to break the path from FSM logic.
-            raw_data_en <= (output_dma_state == S_READ_URAM);
-        end
-    end
-    
-    always @(posedge clk) begin
-        // Use the replicated enable signal
-        if (raw_data_en) begin
-            r_raw_uram_data <= uram_rdata;
-        end
-    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -162,7 +188,6 @@ module output_dma #(
             gearbox_buffer <= 0;
             gearbox_fill_level <= 0;
             
-            // Reset Pipeline Regs
             r_out_width <= 0;
             r_num_w_strips <= 0;
             r_valid_pixels_per_strip <= 0;
@@ -196,7 +221,12 @@ module output_dma #(
                 S_CALC_1: begin
                     r_out_width <= (stride == 2) ? (img_width >> 1) : img_width;
                     r_num_w_strips <= (img_width + PP_PAR - 1) / PP_PAR;
-                    r_valid_pixels_per_strip <= (stride == 2) ? (PP_PAR >> 1) : PP_PAR;
+                    // r_valid_pixels_per_strip <= (stride == 2) ? (PP_PAR >> 1) : PP_PAR;
+		    if (stride == 2) begin
+			r_valid_pixels_per_strip <= (PP_PAR >> 1);
+		    end else begin
+			r_valid_pixels_per_strip <= (img_width < PP_PAR) ? img_width : PP_PAR;
+		    end
                     output_dma_state <= S_CALC_2;
                 end
                 
@@ -206,7 +236,8 @@ module output_dma #(
                     if (flatten) begin
                         r_words_per_row <= r_out_width * CHUNKS_PER_URAM_WORD;
                     end else begin
-                        r_words_per_row <= (r_out_width * BITS_PER_PIXEL_BLOCK + HBM_DATA_WIDTH - 1) / HBM_DATA_WIDTH;
+                        // r_words_per_row <= (r_out_width * BITS_PER_PIXEL_BLOCK + HBM_DATA_WIDTH - 1) / HBM_DATA_WIDTH;
+			r_words_per_row <= (r_num_w_strips * r_valid_pixels_per_strip * BITS_PER_PIXEL_BLOCK + HBM_DATA_WIDTH - 1) / HBM_DATA_WIDTH;
                     end
                     r_total_uram_words <= (stride == 2) ? r_num_w_strips * (active_height >> 1) : r_num_w_strips * active_height;
 		    r_num_oc_tiles <= oc_channels / OC_PAR;
@@ -235,10 +266,7 @@ module output_dma #(
                 end
 
 		S_CALC_4: begin
-		    // write_base_addr <= tile_y_index * (r_stride_oc_tile_words * (oc_channels / OC_PAR)) +
-		    //	    	       tile_oc_index * r_stride_oc_tile_words;
 		    write_base_addr <= (r_tile_y_stride + tile_oc_index) * r_stride_oc_tile_words;
-                    
 		    uram_addr <= 0;
 		    word_cnt <= 0;
 		    flat_chunk_idx <= 0;
@@ -258,15 +286,19 @@ module output_dma #(
                 end
 
 		S_LATCH_RAW: begin
-		    // r_raw_uram_data <= uram_rdata;
-		    output_dma_state <= S_QUANTIZE;
+		    output_dma_state <= S_PIPE_WAIT_1;
 		end
 
-		S_QUANTIZE: begin
-		    r_quantized_data <= quantized_data;
+		S_PIPE_WAIT_1: begin
+		    output_dma_state <= S_PIPE_WAIT_2;
+		end
+		S_PIPE_WAIT_2: begin
+		    output_dma_state <= S_PIPE_WAIT_3;
+		end
+		S_PIPE_WAIT_3: begin
 		    output_dma_state <= S_WAIT_URAM;
 		end
-                
+
                 S_WAIT_URAM: begin
                     if (flatten) begin
                         input_pixel_cnt <= 0;
@@ -285,8 +317,6 @@ module output_dma #(
                          output_dma_state <= S_PROCESS;
                     end else begin
                     if (flatten) begin
-                        // --- FLATTEN MODE ---
-                        // if (write_ready || !write_valid) begin
                             if (input_pixel_cnt < r_valid_pixels_per_strip) begin
                                 if (flat_chunk_idx == 0) begin
                                     write_data <= {{(HBM_DATA_WIDTH - BITS_PER_PIXEL_BLOCK){1'b0}}, 
@@ -316,30 +346,25 @@ module output_dma #(
                                     output_dma_state <= S_READ_URAM;
                                 end
                             end
-                        // end
                     end else begin
                         // --- STANDARD MODE (Gearbox) ---
                         if (gearbox_fill_level >= HBM_DATA_WIDTH) begin
-                            // if (write_ready || !write_valid) begin
                                 write_data <= gearbox_buffer[0 +: HBM_DATA_WIDTH];
                                 write_valid <= 1;
                                 gearbox_buffer <= (gearbox_buffer >> HBM_DATA_WIDTH);
                                 gearbox_fill_level <= gearbox_fill_level - HBM_DATA_WIDTH;
-                            // end
                         end else begin
 			    write_valid <= 0;
                             if (word_cnt == r_total_uram_words - 1) begin
                                 if (gearbox_fill_level > 0) begin
                                     output_dma_state <= S_FLUSH;
                                 end else begin
-                                    // write_valid <= 0;  // TODO
                                     output_dma_state <= S_WAIT_DONE;
                                 end
                             end else begin
                                 word_cnt <= word_cnt + 1;
                                 uram_addr <= uram_addr + 1;
                                 uram_ren <= 1;
-                                // write_valid <= 0;  // TODO
                                 output_dma_state <= S_READ_URAM;
                             end
                         end
@@ -348,15 +373,13 @@ module output_dma #(
                 end
                 
                 S_FLUSH: begin
-		    if (write_valid && !write_ready) begin //TODO
+		    if (write_valid && !write_ready) begin
 			output_dma_state <= S_FLUSH;
 		    end else begin
-                    // if (write_ready || !write_valid) begin
                         write_data <= gearbox_buffer[0 +: HBM_DATA_WIDTH];
                         write_valid <= 1;
                         gearbox_fill_level <= 0;
                         output_dma_state <= S_WAIT_DONE;
-                    // end
 		    end
                 end
                 
@@ -369,9 +392,6 @@ module output_dma #(
                         write_valid <= 1'b0;
                         output_dma_state <= S_DONE;
                     end
-
-                    // if (write_ready) write_valid <= 0;
-                    // if (write_done) output_dma_state <= S_DONE;
                 end
                 
                 S_DONE: begin

@@ -21,7 +21,7 @@ module conv_controller #(
     input wire weight_ack,
     
     (* max_fanout = 20 *) output reg lb_shift_en,
-    output reg seq_load,
+    (* max_fanout = 20 *) output reg seq_load,
     (* max_fanout = 20 *) output reg [1:0] k_x,
     (* max_fanout = 20 *) output reg [1:0] k_y,
     (* max_fanout = 20 *) input wire [1:0] stride,
@@ -89,6 +89,8 @@ module conv_controller #(
 	    weight_req <= 0;
 	    height_limit <= 0;
 	    row_is_valid <= 1;
+	    k_x <= 0;
+	    k_y <= 0;
         end else begin
             // Default Pulses
             lb_shift_en <= 0;

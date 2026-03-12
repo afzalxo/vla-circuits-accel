@@ -7,7 +7,7 @@
 
 
 int verify_output(const std::vector<int8_t>& hw_output, const std::string& golden_file, 
-                  int H, int W, int C, int stride, int flatten) {
+                  int H, int W, int C, int stride, int flatten, bool is_sparse, uint64_t oc_mask_lo, uint64_t oc_mask_hi) {
     
     std::vector<uint8_t> file_golden_raw;
     load_bin(golden_file, file_golden_raw);
@@ -35,6 +35,7 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
 	int num_oc_tiles = (C + OC_PAR - 1) / OC_PAR;
 
         for (int ot = 0; ot < num_oc_tiles; ++ot) {
+	    bool is_tile_active = !is_sparse || (is_sparse && ((oc_mask_lo & (1ULL << ot)) != 0));
             for (int r = 0; r < active_tile_h_out; ++r) {
                 for (int w_strip = 0; w_strip < num_w_strips; ++w_strip) {
                     for (int p = 0; p < eff_pp_par; ++p) {
@@ -51,21 +52,26 @@ int verify_output(const std::vector<int8_t>& hw_output, const std::string& golde
                                 size_t gold_idx = (global_oc * out_h * out_w) + (global_h * out_w) + global_w;
 
 				if (gold_idx < golden.size()) {
-                                int8_t exp = golden[gold_idx];
-                                int8_t got = hw_output[linear_idx];
-			        // std::cout << "Idx[" << linear_idx << "] H=" << global_h << " W=" << global_w << " C=" << global_oc << " Exp=" << (int)exp << " Got=" << (int)got << std::endl;
-                                int diff = std::abs((int)got - (int)exp);
-                                if (diff > 0) {
-                                    // if (errors < 50) {
-                                        std::cout << "Mismatch [H=" << global_h << " W=" << global_w << " C=" << global_oc 
-                                                  << "] Exp: " << (int)exp << " Got: " << (int)got 
-                                                  << " (Diff: " << diff << ")" << std::endl;
-                                    // }
-                                    errors++;
-			            if (diff > max_diff) {
-			                max_diff = diff;
-			            }
-                                }
+				    if (is_tile_active) {
+                                        int8_t exp = golden[gold_idx];
+                                        int8_t got = hw_output[linear_idx];
+			                // std::cout << "Idx[" << linear_idx << "] H=" << global_h << " W=" << global_w << " C=" << global_oc << " Exp=" << (int)exp << " Got=" << (int)got << std::endl;
+                                        int diff = std::abs((int)got - (int)exp);
+                                        if (diff > 0) {
+                                            // if (errors < 50) {
+                                                std::cout << "Mismatch [H=" << global_h << " W=" << global_w << " C=" << global_oc 
+                                                          << "] Exp: " << (int)exp << " Got: " << (int)got 
+                                                          << " (Diff: " << diff << ")" << std::endl;
+                                            // }
+                                            errors++;
+			                    if (diff > max_diff) {
+			                        max_diff = diff;
+			                    }
+				        }
+                                    } else {
+				        // std::cout << "Output Match [H=" << global_h << " W=" << global_w << " C=" << global_oc 
+				    //	      << "] Exp: " << (int)exp << " Got: " << (int)got << std::endl;
+				    }
 				}
 			    }
                             linear_idx++;
@@ -92,7 +98,7 @@ int verify_gap_output(const std::vector<int8_t>& hw_output, const std::string& g
     int errors = 0;
     int max_diff = 0;
     const int CHANNELS_PER_TILE = OC_PAR;
-    const int BYTES_PER_HW_STRIP = PP_PAR * CHANNELS_PER_TILE;
+    const int BYTES_PER_HW_STRIP = 4 * CHANNELS_PER_TILE; //PP_PAR * CHANNELS_PER_TILE;
 
     int num_tiles = (total_channels + CHANNELS_PER_TILE - 1) / CHANNELS_PER_TILE;
 

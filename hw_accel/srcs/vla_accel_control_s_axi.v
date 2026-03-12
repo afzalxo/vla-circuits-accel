@@ -257,10 +257,9 @@ end
         end else if (ACLK_EN & ar_hs) begin
             // Read logic based on captured ARADDR
             rdata_reg <= 32'b0; // Default value for reads
-	    $display("Register Read Logic");
             case (ARADDR)
 		ADDR_AP_CTRL: begin
-		    $display("AP Control Read: %b", {int_auto_restart, int_ap_ready, int_ap_idle, int_ap_done, int_ap_start});
+		    // $display("AP Control Read: %b", {int_auto_restart, int_ap_ready, int_ap_idle, int_ap_done, int_ap_start});
 		    rdata_reg <= {27'b0, int_auto_restart, int_ap_ready, int_ap_idle, int_ap_done, int_ap_start};
 		end
 		ADDR_FEAT_INPUT_ADDR_LO: begin

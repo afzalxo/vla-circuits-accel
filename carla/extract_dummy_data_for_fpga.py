@@ -8,23 +8,20 @@ import cv2
 from PIL import Image
 import json
 from tqdm import tqdm
-from models.carla_model import CarlaVLAHW_Gated as CarlaVLA
-from carla_utils.route_utils import command_to_branch_id
+from models.carla_model import CarlaVLASmall as CarlaVLA
 
 DATASET_DIR = "carla_ue4_dataset_base"
 CSV_PATH = os.path.join(DATASET_DIR, "data.csv")
 IMG_DIR = os.path.join(DATASET_DIR, "images")
-MODEL_PATH = "model_checkpoints/carla_vla_furthest_driver_gated.pth"
-OUTPUT_DIR = "fpga_data"
+OUTPUT_DIR = "fpga_data_dummy"
 
-n_prev_act_feat = 128
-PP_PAR = 8
 # Hardware Constraints
 BIT_WIDTH = 8
 Q_MAX = 127
 Q_MIN = -128
-IMG_SIZE = 256
-CALIBRATION_SAMPLES = 50  # Number of samples to profile
+STACK_FRAMES = 1
+IMG_SIZE = 32
+CALIBRATION_SAMPLES = 1000  # Number of samples to profile
 ROUNDING_MODE = "round"
 
 B_LIMIT = 2**27
@@ -47,16 +44,17 @@ OPCODES = {
     "OP_HALT": 0xFF
 }
 
+n_prev_act_feat = 64
+PP_PAR = 8
+
 layer_specs = []
 
-def add_layer_spec(name, in_hwc, out_c, stride, shift, relu, opcode, oc_mask_lo=None, oc_mask_hi=None, weight_f="", bias_f="", gold_f=""):
+def add_layer_spec(name, in_hwc, out_c, stride, shift, relu, opcode, oc_mask=None, weight_f="", bias_f="", gold_f=""):
     opcode = OPCODES.get(opcode, 0x00)
-    if oc_mask_lo is None: oc_mask_lo = 0xFFFFFFFFFFFFFFFF
-    if oc_mask_hi is None: oc_mask_hi = 0xFFFFFFFFFFFFFFFF
+    if oc_mask is None: oc_mask = 0xFFFFFFFF
     if weight_f == "": weight_f = "NULL"
     if bias_f == "": bias_f = "NULL"
     if gold_f == "": gold_f = "NULL"
-    is_sparse = 1 if (oc_mask_lo != 0xFFFFFFFFFFFFFFFF or oc_mask_hi != 0xFFFFFFFFFFFFFFFF) else 0
     layer_specs.append({
         "name": name,
         "in_w": in_hwc[1], "in_h": in_hwc[0], "in_c": in_hwc[2],
@@ -65,9 +63,8 @@ def add_layer_spec(name, in_hwc, out_c, stride, shift, relu, opcode, oc_mask_lo=
         "quant_shift": shift,
         "relu": 1 if relu else 0,
         "opcode": opcode,
-        "is_sparse": is_sparse,
-        "oc_mask_lo": oc_mask_lo,
-        "oc_mask_hi": oc_mask_hi,
+        "is_sparse": 1 if oc_mask != 0xFFFFFFFF else 0,
+        "oc_mask": oc_mask,
         "weight_file": weight_f,
         "bias_file": bias_f,
         "golden_file": gold_f
@@ -100,27 +97,26 @@ def get_input_data(df, sample_idx):
     """Prepares 4-frame stack and prev_action exactly like the Eval script."""
     row = df.iloc[sample_idx]
     current_traj = row['trajectory_id']
-    instruction = row['instruction']
-    branch_idx = command_to_branch_id(instruction)
-    task_vec = torch.zeros(1, 6, dtype=torch.float32)
-    task_vec[0, branch_idx] = 1.0
     
     frames = []
     img_path = os.path.join(IMG_DIR, df.iloc[sample_idx]['image_path'])
     with Image.open(img_path) as img:
         img = img.copy()
+        # Resize to 32x32
+        img = img.resize((IMG_SIZE, IMG_SIZE), resample=Image.BILINEAR)
         img_rgb = np.array(img, dtype=np.uint8)
         frames.insert(0, img_rgb)
     img_stack = np.concatenate(frames, axis=2)
     img_stack = np.transpose(img_stack, (2, 0, 1))
    
     img_stack = torch.from_numpy(img_stack).float() / 255.0
-    img_stack = (img_stack.reshape(-1, 3, 256, 256) - NORM_MEAN) / NORM_STD
-    input_stack = img_stack.reshape(1, 3, 256, 256)
+    img_stack = (img_stack.reshape(-1, 3, IMG_SIZE, IMG_SIZE) - NORM_MEAN) / NORM_STD
+    input_stack = img_stack.reshape(1, 3 * STACK_FRAMES, IMG_SIZE, IMG_SIZE)
 
     # 2. Prev Action
     if sample_idx > 0 and df.iloc[sample_idx-1]['trajectory_id'] == current_traj and df.iloc[sample_idx-1]['is_train_candidate'] == 1:
         p_row = df.iloc[sample_idx-1]
+        # prev_action = torch.tensor([p_row['steer'], (p_row['throttle'] - p_row['brake']), p_row['speed']])
         prev_action = torch.tensor([
             p_row['steer'], 
             (p_row['throttle'] - p_row['brake']), 
@@ -129,7 +125,7 @@ def get_input_data(df, sample_idx):
     else:
         prev_action = torch.zeros(3)
 
-    return input_stack, prev_action.unsqueeze(0), task_vec
+    return input_stack, prev_action.unsqueeze(0)
 
 def save_binary(data, filename, dtype=torch.int8):
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
@@ -149,14 +145,12 @@ def hardware_round_shift(acc, shift):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--sample_idx', type=int, default=2332, help="Sample to export as golden test vector")
+    parser.add_argument('--sample_idx', type=int, default=224, help="Sample to export as golden test vector")
     args = parser.parse_args()
 
     print("Loading Model and Data...")
     df = pd.read_csv(CSV_PATH)
     model = CarlaVLA()
-    sd = torch.load(MODEL_PATH, map_location="cpu")
-    model.load_state_dict(sd, strict=True)
     model.eval()
 
     df = df[df['is_train_candidate'] == 1].reset_index(drop=True)
@@ -172,18 +166,18 @@ def main():
 
     with torch.no_grad():
         for idx in tqdm(calib_indices):
-            img_stack, prev_act, task_vec = get_input_data(df, idx)
-            all_pred_masks = model.gater(task_vec)
-            split_masks = torch.split(all_pred_masks, model.predictable_tiles, dim=1)
+            img_stack, prev_act = get_input_data(df, idx)
             
             # Step-by-step forward pass to capture activation ranges
             curr = img_stack
             for i, layer in enumerate(model.get_conv_layers()):
+                # stride = 2 if i < 2 else 1
                 stride = 2
-                curr = F.conv2d(curr, layer.weight, bias=layer.bias, stride=stride, padding=1)
-                curr = model.apply_mask(curr, split_masks[i], hard_masking=True)
-                curr = F.relu(curr)
+                curr = F.relu(F.conv2d(curr, layer.weight, bias=layer.bias, stride=stride, padding=1))
                 act_maxima[f'conv{i}'] = max(act_maxima.get(f'conv{i}', 0), torch.max(torch.abs(curr)).item())
+
+            # curr = F.adaptive_avg_pool2d(curr, (1, 1)).flatten(1)
+            # act_maxima['gap'] = max(act_maxima.get('gap', 0), torch.max(torch.abs(curr)).item())
 
             act_feat = F.relu(model.measure_proj(prev_act))
             act_maxima['measure'] = max(act_maxima.get('measure', 0), torch.max(torch.abs(act_feat)).item())
@@ -202,6 +196,17 @@ def main():
                     
                     key = f"b{b_idx}_{name}"
                     act_maxima[key] = max(act_maxima.get(key, 0), torch.max(torch.abs(b_curr)).item())
+
+            '''
+            dense_layers = [("fusion", model.fusion, True), ("fc1", model.branches[0][0], True), 
+                            ("fc2", model.branches[0][2], True), ("head", model.branches[0][4], False)]
+            
+            for name, layer, use_relu in dense_layers:
+                curr = F.linear(curr, layer.weight, bias=layer.bias)
+                if use_relu: curr = F.relu(curr)
+                act_maxima[name] = max(act_maxima.get(name, 0), torch.max(torch.abs(curr)).item())
+            '''
+
     # =========================================================================
     # PHASE 2: CALCULATE FIXED GLOBAL SHIFTS
     # =========================================================================
@@ -210,7 +215,7 @@ def main():
     
     # Track cumulative scale throughout profiling logic
     # We use a representative input scale (99.9th percentile of input)
-    input_stack_example, _, task_vec = get_input_data(df, args.sample_idx)
+    input_stack_example, _ = get_input_data(df, args.sample_idx)
     c_scale = Q_MAX / torch.max(torch.abs(input_stack_example)).item()
     
     for i in range(len(model.get_conv_layers())):
@@ -223,6 +228,12 @@ def main():
         shift = int(np.ceil(np.log2(val_to_quantize / Q_MAX))) if val_to_quantize > 0 else 0
         global_shifts[f'conv{i}'] = shift
         c_scale /= (2**shift)
+
+    # GAP
+    h, w = 8, 8 # Conv Output dims
+    gap_shift = int(np.log2(h * w))
+    # global_shifts['gap'] = gap_shift
+    # c_scale *= ((h*w) / (2**gap_shift))
 
     # Fusion
     w_scale = Q_MAX / torch.max(torch.abs(model.fusion.weight)).item()
@@ -245,6 +256,16 @@ def main():
             shift = int(np.ceil(np.log2(val_to_quantize / Q_MAX))) if val_to_quantize > 0 else 0
             global_shifts[f'b{b_idx}_{name}'] = shift
             c_scale /= (2**shift)
+    '''
+    # Dense
+    for name, layer, _ in dense_layers:
+        w_scale = Q_MAX / torch.max(torch.abs(layer.weight)).item()
+        c_scale *= w_scale
+        val_to_quantize = act_maxima[name] * c_scale
+        shift = int(np.ceil(np.log2(val_to_quantize / Q_MAX))) if val_to_quantize > 0 else 0
+        global_shifts[name] = shift
+        c_scale /= (2**shift)
+    '''
 
     with open(os.path.join(OUTPUT_DIR, "global_shifts.json"), "w") as f:
         json.dump(global_shifts, f, indent=4)
@@ -257,9 +278,7 @@ def main():
     # Get real sample_idx since we dropped samples which are not train candidates
     # TODO
 
-    img_stack, prev_act, task_vec = get_input_data(df, args.sample_idx)
-    all_pred_masks = model.gater(task_vec)
-    split_masks = torch.split(all_pred_masks, model.predictable_tiles, dim=1)
+    img_stack, prev_act = get_input_data(df, args.sample_idx)
     # [1, C, H, W]
     # Export and save input_stack_example into a txt file for debugging
     # np.savetxt("img_stack_0.txt", img_stack.flatten().numpy())
@@ -284,20 +303,9 @@ def main():
         bias_scale = cumulative_scale * w_scale
         b_int = quantize_and_save_bias(layer.bias.detach(), bias_scale, f"bias_conv{i}.bin")
         
+        # stride = 2 if i < 2 else 1
         stride = 2
         acc = F.conv2d(curr_int.float(), w_int.float(), bias=b_int.float(), stride=stride, padding=1)
-        pred_mask = (split_masks[i] > 0.5).float()
-        always_on = torch.ones(1, 1, device=pred_mask.device)
-        full_mask = torch.cat([always_on, pred_mask], dim=1)
-        mask_int = 0
-        for bit_idx, bit_val in enumerate(full_mask[0]):
-            if bit_val.item() > 0:
-                mask_int |= (1 << bit_idx)
-                
-        # Reshape mask to multiply with[1, C, H, W] activation tensor
-        mask_reshaped = full_mask.view(1, -1, 1, 1, 1).expand(1, -1, model.oc_par, 1, 1).reshape(1, layer.out_channels, 1, 1)
-        
-        acc = acc * mask_reshaped
         acc = F.relu(acc)
         
         shift = global_shifts[f'conv{i}']
@@ -307,7 +315,7 @@ def main():
 
         add_layer_spec(f"conv_{i}", (current_h, current_w, layer.in_channels), layer.out_channels,
                         stride, shift, True, "OP_CONV",
-                       mask_int, None,  # Hi mask all ones
+                       None,
                        f"fpga_data_carla/weights_conv{i}.bin",
                        f"fpga_data_carla/bias_conv{i}.bin",
                        f"fpga_data_carla/golden_conv{i}.bin")
@@ -315,18 +323,15 @@ def main():
         current_w //= stride
 
     # 3. GAP
-    '''
-    gap_acc = torch.sum(curr_int.float(), dim=(2, 3), keepdim=True)
-    curr_int = hardware_round_shift(gap_acc, global_shifts['gap']).clamp(Q_MIN, Q_MAX).flatten(1)
-    save_binary(curr_int, "golden_gap.bin")
-    cumulative_scale *= (8*8 / (2**global_shifts['gap']))
+    # gap_acc = torch.sum(curr_int.float(), dim=(2, 3), keepdim=True)
+    # curr_int = hardware_round_shift(gap_acc, global_shifts['gap']).clamp(Q_MIN, Q_MAX).flatten(1)
+    # save_binary(curr_int, "golden_gap.bin")
+    # cumulative_scale *= (8*8 / (2**global_shifts['gap']))
 
     # Ad-hoc crap here. Need to systematize this better
-    add_layer_spec("gap", (current_h, current_w, conv_layers[-1].out_channels), conv_layers[-1].out_channels, 1, global_shifts['gap'], False, "OP_GAP", "", "", "fpga_data_carla/golden_gap.bin")
-    '''
-
+    # add_layer_spec("gap", (current_h, current_w, conv_layers[-1].out_channels), conv_layers[-1].out_channels, 1, global_shifts['gap'], False, "OP_GAP", "", "", "fpga_data_carla/golden_gap.bin")
     # Memcpy for prev_action features
-    add_layer_spec("memcpy", (0, 0, 0), n_prev_act_feat * (PP_PAR // 2), 0, 0, False, "OP_MEMCPY", None, None, "", "", "fpga_data_carla/golden_fused_features.bin")
+    add_layer_spec("memcpy", (0, 0, 0), n_prev_act_feat * (PP_PAR // 2), 0, 0, False, None, "OP_MEMCPY", "", "", "fpga_data_carla/golden_fused_features.bin")
 
     # 4. Fusion
     print(f"Prev Action: {prev_act}")
@@ -360,7 +365,7 @@ def main():
     cumulative_scale = (cumulative_scale * w_scale) / (2**shift)
 
     add_layer_spec("fusion", (1, 1, layer.in_features), layer.out_features, 1, global_shifts[name],
-                    True, "OP_GEMM", None, None, f"fpga_data_carla/weights_{name}.bin",
+                    True, "OP_GEMM", None, f"fpga_data_carla/weights_{name}.bin",
                    f"fpga_data_carla/bias_{name}.bin",
                    f"fpga_data_carla/golden_{name}.bin")
 
@@ -392,7 +397,7 @@ def main():
             cumulative_scale = (cumulative_scale * w_scale) / (2**shift)
 
             add_layer_spec(f"{name}", (1, 1, layer.in_features), layer.out_features, 1, shift,
-                            use_relu, "OP_GEMM", None, None, f"fpga_data_carla/weights_{name}.bin",
+                            use_relu, "OP_GEMM", None, f"fpga_data_carla/weights_{name}.bin",
                            f"fpga_data_carla/bias_{name}.bin",
                            f"fpga_data_carla/golden_{name}.bin")
 
@@ -404,7 +409,7 @@ def main():
         for spec in layer_specs:
             line = (f"{spec['name']} {spec['in_w']} {spec['in_h']} {spec['in_c']} "
                     f"{spec['out_c']} {spec['stride']} {spec['quant_shift']} {spec['relu']} "
-                    f"{spec['opcode']} {spec['is_sparse']} {spec['oc_mask_lo']} {spec['oc_mask_hi']} {spec['weight_file']} {spec['bias_file']} {spec['golden_file']}\n")
+                    f"{spec['opcode']} {spec['is_sparse']} {spec['oc_mask']} {spec['weight_file']} {spec['bias_file']} {spec['golden_file']}\n")
             f.write(line)
     print("Exported model_spec.txt for C++ host.")
 
@@ -417,8 +422,7 @@ def main():
     hw_action = torch.tanh(hw_logits).numpy()[0]
     
     with torch.no_grad():
-        sw_logits, _ = model(img_stack, prev_act, task_vec, hard_masking=True)
-        sw_logits = sw_logits[0, 0]
+        sw_logits = model(img_stack, prev_act)[0, 0] # Branch 0
         sw_action = sw_logits.numpy()
 
     print("\n" + "="*60)
@@ -428,6 +432,7 @@ def main():
     print(f"HW Logits (No Scaling): {hw_logits.numpy()}")
     print(f"HW Action (Fixed Shifts): {hw_action}")
     print(f"SW Action (Ideal Float):  {sw_action}")
+    print(f"Final Global Scale:       {cumulative_scale:.4f}")
     
     err = np.abs(hw_action - sw_action)
     print(f"Max Deviation:            {np.max(err):.4f}")

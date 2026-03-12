@@ -33,21 +33,23 @@ module instruction_scheduler #(
     (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_input_addr,
     (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_output_addr,
     (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_weight_addr,
+    (* max_fanout = 20 *) output reg [ADDR_WIDTH-1:0] cfg_bias_addr,
     output reg [15:0] cfg_img_width,
     output reg [15:0] cfg_img_height,
     output reg [15:0] cfg_in_channels,
     output reg [15:0] cfg_out_channels,
     (* max_fanout = 20 *) output reg [4:0]  cfg_quant_shift,
-    output reg        cfg_is_conv, // 1=Conv, 0=Dense/Other
+    output reg        cfg_is_conv,
     output reg	      cfg_is_memcpy,
     output reg	      cfg_is_gap,
+    output reg        cfg_bias_en,
     (* max_fanout = 20 *) output reg 	      cfg_relu_en,
     output reg [1:0]  cfg_stride,
     output reg 	      cfg_flatten,
     output reg [2:0]  cfg_log2_mem_tile_height,
     output reg        cfg_is_sparse,
-    output reg [31:0] cfg_ic_tile_mask,
-    output reg [31:0] cfg_oc_tile_mask,
+    output reg [127:0] cfg_ic_tile_mask,
+    output reg [127:0] cfg_oc_tile_mask,
     output reg [1:0]  cfg_input_bank,
     output reg [1:0]  cfg_output_bank
 );
@@ -74,7 +76,7 @@ module instruction_scheduler #(
     
     // Instruction Register
     reg [DATA_WIDTH-1:0] instr_reg;
-    wire [7:0] opcode = instr_reg[263:256];
+    wire [7:0] opcode = instr_reg[327:320];
 
     // Opcode Definitions
     localparam OP_CONV   = 8'h01;
@@ -97,6 +99,7 @@ module instruction_scheduler #(
             cfg_input_addr <= 0;
             cfg_output_addr <= 0;
             cfg_weight_addr <= 0;
+	    cfg_bias_addr <= 0;
             cfg_img_width <= 0;
             cfg_img_height <= 0;
             cfg_in_channels <= 0;
@@ -110,6 +113,9 @@ module instruction_scheduler #(
 	    cfg_output_bank <= 0;
 	    cfg_stride <= 2'b01;
 	    cfg_flatten <= 0;
+	    cfg_is_sparse <= 0;
+	    cfg_ic_tile_mask <= {128{1'b1}};
+	    cfg_oc_tile_mask <= {128{1'b1}};
         end else begin
             // Default Pulses
             exec_start <= 0;
@@ -121,6 +127,10 @@ module instruction_scheduler #(
                         pc <= base_addr;
                         instruction_scheduler_state <= S_FETCH_REQ;
 			cc_counter <= 0;
+
+		        cfg_is_sparse <= 0;
+		        cfg_ic_tile_mask <= {128{1'b1}};
+		        cfg_oc_tile_mask <= {128{1'b1}};
                     end
                 end
 
@@ -151,73 +161,69 @@ module instruction_scheduler #(
                 // 3. Decode Instruction
                 S_DECODE: begin
                     // Map bits to configuration registers
-                    // Layout:
-                    // [63:0] Input Addr
-                    // [127:64] Output Addr
-                    // [191:128] Weight Addr
-                    // [207:192] Width
-                    // [223:208] Height
-                    // [239:224] In Channels
-                    // [255:240] Out Channels
-                    // [263:256] Opcode
-                    // [271:264] Quant Shift
-		    // [279:272] Bank Select (2 LSB bits input, next 2 bits
-		    // output)
-		    // [280] ReLU Enable
-                    
                     cfg_input_addr   <= instr_reg[63:0];
                     cfg_output_addr  <= instr_reg[127:64];
                     cfg_weight_addr  <= instr_reg[191:128];
-                    cfg_img_width    <= instr_reg[207:192];
-                    cfg_img_height   <= instr_reg[223:208];
-                    cfg_in_channels  <= instr_reg[239:224];
-                    cfg_out_channels <= instr_reg[255:240];
-                    
-		    cfg_input_bank  	     <= instr_reg[273:272];
-		    cfg_output_bank 	     <= instr_reg[275:274];
-		    cfg_relu_en     	     <= instr_reg[280];
-		    cfg_stride      	     <= instr_reg[289:288];
-		    cfg_log2_mem_tile_height <= instr_reg[298:296];
-		    cfg_flatten              <= instr_reg[304];
-		    cfg_is_sparse   	     <= instr_reg[312];
-		    cfg_ic_tile_mask         <= instr_reg[351:320];
-		    cfg_oc_tile_mask         <= instr_reg[383:352];
+		    cfg_bias_addr    <= instr_reg[255:192];
 
-                    // Opcode Check
+                    cfg_img_width    <= instr_reg[271:256];
+                    cfg_img_height   <= instr_reg[287:272];
+                    cfg_in_channels  <= instr_reg[303:288];
+                    cfg_out_channels <= instr_reg[319:304];
+                    
+		    cfg_quant_shift          <= instr_reg[328 +: 5];
+		    cfg_input_bank  	     <= instr_reg[336 +: 2];
+		    cfg_output_bank 	     <= instr_reg[338 +: 2];
+		    cfg_stride      	     <= instr_reg[344 +: 2];
+		    cfg_log2_mem_tile_height <= instr_reg[352 +: 3];
+
+		    cfg_relu_en     	     <= instr_reg[360];
+		    cfg_flatten              <= instr_reg[361];
+		    cfg_is_sparse            <= instr_reg[362];
+		    cfg_bias_en              <= instr_reg[363];
+
+                    // Instruction specific overrides
                     if (opcode == OP_HALT) begin
 			cfg_is_conv <= 0;
 			cfg_is_gap <= 0;
 			cfg_is_memcpy <= 0;
 			cfg_quant_shift <= 0;
+			cfg_is_sparse <= 0;
+			cfg_ic_tile_mask <= {128{1'b1}};
+			cfg_oc_tile_mask <= {128{1'b1}};
+			cfg_bias_en <= 0;
+			cfg_bias_addr <= 0;
                         instruction_scheduler_state <= S_DONE;
                     end else if (opcode == OP_CONV) begin
                         cfg_is_conv <= 1;
 			cfg_is_gap <= 0;
 			cfg_is_memcpy <= 0;
-			cfg_quant_shift <= instr_reg[268:264];
+		        cfg_ic_tile_mask         <= cfg_oc_tile_mask;
+		        cfg_oc_tile_mask         <= instr_reg[384 +: 128];
                         instruction_scheduler_state <= S_EXECUTE;
 		    end else if (opcode == OP_GEMM) begin
 			cfg_is_conv <= 0;
 			cfg_is_gap <= 0;
 			cfg_is_memcpy <= 0;
-			cfg_img_width <= instr_reg[207:192];
 			cfg_img_height <= 16'd1;
 			cfg_stride <= 2'b01;
-			cfg_quant_shift <= instr_reg[268:264];
+		        cfg_ic_tile_mask         <= cfg_oc_tile_mask;
+			// For now, no tiling support for GEMM
+		        cfg_oc_tile_mask         <= {128{1'b1}};
 			instruction_scheduler_state <= S_EXECUTE;
 		    end else if (opcode == OP_MEMCPY) begin
 			cfg_is_conv <= 0;
 			cfg_is_gap <= 0;
 			cfg_is_memcpy <= 1;
-			instruction_scheduler_state <= S_EXECUTE;
+			cfg_is_sparse <= 0;
 			cfg_in_channels <= 0;
 			cfg_img_height <= 0;
 			cfg_img_width <= 0;
+			instruction_scheduler_state <= S_EXECUTE;
 		    end else if (opcode == OP_GAP) begin 
 			cfg_is_conv <= 0;
 			cfg_is_memcpy <= 0;
 			cfg_is_gap <= 1;
-			cfg_quant_shift <= instr_reg[268:264];
 			instruction_scheduler_state <= S_EXECUTE;
 		    end else begin
 			$display("ERROR: Unknown Opcode %h at PC %h", opcode, pc);

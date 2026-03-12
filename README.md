@@ -50,3 +50,46 @@ The following image shows the device view of the AMD/Xilinx's Alveo U50 chip imp
 The design is currently running at only around 148 MHz as I have not optimized certain critical paths as of yet. I am expecting the final design frequency to be in the range 250-300 MHz. Per frame latency is currently around 15ms, but again, this will likely be reduced to sub 10ms when things are finalized. 
 
 The next steps are to train the model with instruction-specific grouping of tiles, similar to what we did for the BabyAI dataset. The hardware accelerator already supports tile masking using `is_sparse`, `ic_tile_mask`, and `oc_tile_mask` flags which allow skipping portions of the model not needed for the active task. Once this is finished, I will work on task composition: Circuit('follow lane' in 'weather') U Circuit('follow lane' in 'dynamic') = Circuit('follow lane' in 'weather' and 'dynamic').
+
+
+### Updates on Model and Hardware
+
+I have been working on improving the hardware accelerators performance. 
+
+1. I improved the end-to-end latency from the previous result of around 19.4 ms to around 15 ms by improving memory-bandwidth utilization. Previously, I was performing external memory access for feature maps in bursts such that we wait for an entire 4KB burst of data to arrive to the FPGA before the next burst transaction is issued. In the new read master, I am using outstanding reads to issue bursts requests in a pipeline, so we can avoid ~100 cycle overhead of having to wait for a new burst request to arrive at the HBM memory controller. The improvement is achieved without making any sacrifices to resource utilization or design frequency. 
+
+2. I also improved the design frequency from 133 MHz to 181 MHz by tuning critical paths in the design. There is still room for improvement into the 250-300 MHz range.
+
+3. I also added double buffering at the input features, weights and biases level. So now while we are fetching features and weights for tile N+1, we have the accelerator performing computations for tile N. This way, we can hide the latency of memory accesses behind the computation latency. This double buffering works across IC/OC tiles. So if all IC tiles are finished being fetched, we proceed to the next OC's first IC tile for fetch while performing compute on the last IC tile of the previous OC.
+
+On the model side, I added a task-gated mechanism for training the model. I added a `TileGatingNetwork` which predicts which of the hardware tiles to turn on or off for the currently active task. The training process involves training the model parameters and the tile gating network jointly, so the tiles chosen for a certain task are optimized for that task. I trained the gated model on the carla dataset. The trained model achieves around 35.3% tile sparsity (i.e., this proportion of the total tiles in the model are inactive). Here is the breakdown of the MAC and parameter activation for different tasks:
+
+## Hardware-Aligned Computation & Parameter Sparsity (VLA Gated Conv Layers)
+
+| Task               | Active MACs | Total MACs | Active % (MACs) | Active Params | Total Params | Active % (Params) |
+|--------------------|-------------|------------|-----------------|---------------|--------------|-------------------|
+| Follow Lane        | 240.95M     | 429.39M    | 56.1%           | 6.92M         | 11.01M       | 62.9%             |
+| Turn Left          | 273.53M     | 429.39M    | 63.7%           | 5.90M         | 11.01M       | 53.6%             |
+| Turn Right         | 301.99M     | 429.39M    | 70.3%           | 6.49M         | 11.01M       | 58.9%             |
+| Change Lane Left   | 298.09M     | 429.39M    | 69.4%           | 6.89M         | 11.01M       | 62.6%             |
+| Change Lane Right  | 237.95M     | 429.39M    | 55.4%           | 5.49M         | 11.01M       | 49.9%             |
+| Stop               | 83.53M      | 429.39M    | 19.5%           | 1.55M         | 11.01M       | 14.1%             | 
+
+Perhaps unsurprisingly, simple tasks such as stop consume the least amount of compute and parameters. The sparsity can be increased by exploring the `LAMBDA_SPARSE` vs driving capability tradeoff. I was conservative in choosing `LAMBDA_SPARSE` because I am strict on driving metrics (I evaluate on multiple driving routes in multiple driving scenarios, and I dont want the model to fail at a route due to the sparsity).
+
+I also measured runtimes of different tasks on the FPGA to ensure that the tile-switching is working as intended and we are indeed getting linear speedups as expected from the sparsity, whereas GPU results show no speedup from the sparsity due to the lack of support for dynamic switching of tiles on the GPU. However, the A100 GPU achieves a much lower latency compared to the FPGA (around 2-3x faster) in the dense case. This is mainly due to incredibly high clock speed and memory bandwidth on the GPU. This can be addressed if we send our design to a fab.  
+
+The task specific activation of tiles is shown below:
+
+
+
+
+Right now, I am working on further improving the design's latency somehow. Three avenues remain:
+
+1. Improving the design frequency by further tuning the critical path (I hope I can get to 250-300 MHz range, thats a 65% improvment in the best case. 
+
+2. Scaling up the design: I am thinking of increasing `IC_PAR`/`OC_PAR` from 16 to 32. This will double the speed and resource utilization. I might have to move to a buffer FPGA for this.
+
+3. Output double buffering: Currently, when we are writing the output for a tile, the compute is sitting idle until the write transaction is finished. This can be remedied by double buffering the output. So while writing the output for tile N, we can start computing tile N+1's output. 
+
+Beyond this, the main experiments will be on the latency and inference per kilo joule improvements as a result of our sparsity. Energy consumption experiments are yet to be performed although the GPU seems to be doing suprisingly well for batch 1 power (around 70-80W).  

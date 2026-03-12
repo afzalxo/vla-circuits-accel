@@ -1,12 +1,15 @@
-#include "utils.hpp"
+#ifndef UTILS_HPP
+#define UTILS_HPP
+
+#include "globals.hpp"
 #include <iostream>
-#include <cstdint>
-#include <cmath>
 #include <vector>
 #include <fstream>
 #include <limits>
+#include <string>
 
-void load_bin(const std::string& filename, std::vector<uint8_t>& buffer) {
+template <typename T>
+void load_bin(const std::string& filename, std::vector<T>& buffer) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open " << filename << std::endl;
@@ -18,9 +21,8 @@ void load_bin(const std::string& filename, std::vector<uint8_t>& buffer) {
     file.read(reinterpret_cast<char*>(buffer.data()), size);
 }
 
-void wait_for_enter(const std::string &msg) {
-    std::cout << msg << std::endl;
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-}
+void wait_for_enter(const std::string &msg);
 
+std::vector<LayerConfig> load_model_specs(std::string path);
 
+#endif

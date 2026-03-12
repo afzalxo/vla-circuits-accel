@@ -1,147 +1,128 @@
 `default_nettype none
 /*
- * burst_axi_read_master
- *
- * Reads a burst of data from a specified AXI address.
- * Designed for loading datasets from HBM into on-chip memory.
+ * Pipelined burst_axi_read_master
+ * Decouples AR and R channels to allow Multiple Outstanding Transactions.
+ * Hides HBM round-trip latency.
  */
 module burst_axi_read_master #(
     parameter AXI_ADDR_WIDTH = 64,
     parameter AXI_DATA_WIDTH = 512,
-    parameter MAX_BURST_LEN  = 64
+    parameter MAX_BURST_LEN  = 64,
+    parameter MAX_OUTSTANDING = 8  // Number of requests to run ahead
 ) (
     input wire clk,
-    input wire rst_n, // Active low reset
+    input wire rst_n,
 
     // --- Control Interface ---
-    input wire start, // Pulse to initiate the burst read
+    input wire start,
     input wire [AXI_ADDR_WIDTH-1:0] base_address,
 
     // --- AXI4 Master Read Interface ---
     output reg                            m_axi_arvalid,
     input wire                            m_axi_arready,
-    output wire [AXI_ADDR_WIDTH-1:0]      m_axi_araddr,
-    output wire [7:0]                     m_axi_arlen,
-
+    output reg[AXI_ADDR_WIDTH-1:0]        m_axi_araddr,
+    output reg [7:0]                      m_axi_arlen,
     output wire [2:0]                     m_axi_arsize,
     output wire [1:0]                     m_axi_arburst, 
 
     input wire                            m_axi_rvalid,
-    output reg                            m_axi_rready,
-    input wire [AXI_DATA_WIDTH-1:0]       m_axi_rdata,
+    output wire                           m_axi_rready,
+    input wire[AXI_DATA_WIDTH-1:0]        m_axi_rdata,
     input wire                            m_axi_rlast,
 
-    // --- Data Output Interface (FIFO-like) ---
-    input  wire [15:0] 		 	  total_words_to_read,
+    // --- Data Output Interface ---
+    input  wire [15:0]                    total_words_to_read,
     output wire                           data_valid,
-    output wire [AXI_DATA_WIDTH-1:0]      data_out,
-
-    // --- Status ---
-    output reg done // Pulse high when the entire burst is complete
+    input  wire 			  data_ready,
+    output wire[AXI_DATA_WIDTH-1:0]       data_out,
+    output reg                            done
 );
 
-    // --- FSM Definition ---
-    localparam IDLE         = 3'd0;
-    localparam SEND_AR      = 3'd1;
-    localparam WAIT_AR      = 3'd2;
-    localparam READ_DATA    = 3'd3;
-    localparam DONE_S       = 3'd4;
-    localparam CALC_BURST_LEN = 3'd5;
+    assign m_axi_arsize  = $clog2(AXI_DATA_WIDTH/8);
+    assign m_axi_arburst = 2'b01; // INCR burst type
+    
+    // Internal State
+    reg [31:0] ar_words_left;
+    reg[31:0] r_words_left;
+    reg [7:0]  outstanding_bursts;
 
-    reg [2:0] state = IDLE;
-
-    // --- Internal Registers ---
-    reg [AXI_ADDR_WIDTH-1:0] address_reg;
-    reg [7:0]                burst_len_reg;
-    reg [31:0] 		     words_remaining;
-    reg [15:0] 		     current_transaction_size;
-
-    // --- AXI Signal Assignments ---
-    assign m_axi_araddr = address_reg;
-    assign m_axi_arlen = burst_len_reg;
-    assign m_axi_arsize = $clog2(AXI_DATA_WIDTH/8);
-    assign m_axi_arburst = 2'b01;
-
-    // --- Data Output Assignments ---
-    assign data_out = m_axi_rdata;
-    assign data_valid = m_axi_rvalid && m_axi_rready;
-
+    // --- 0. Busy Flag & Start Protection (THE FIX) ---
+    // This perfectly mimics the original FSM's IDLE state protection.
+    // It prevents spurious 'start' pulses from downstream DMAs 
+    // from resetting the counters in the middle of an active transaction.
+    reg busy;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
-            m_axi_arvalid <= 1'b0;
-            m_axi_rready <= 1'b0;
-            done <= 1'b0;
-            address_reg <= 0;
-            burst_len_reg <= 0;
-	    words_remaining <= 0;
+            busy <= 0;
         end else begin
-            // Default assignments
-            done <= 1'b0; // done is a pulse
+            if (start && !busy) begin
+                busy <= 1; // Lock the doors
+            end else if (m_axi_rvalid && m_axi_rready && (r_words_left == 1)) begin
+                busy <= 0; // Unlock when the very last word arrives
+            end
+        end
+    end
 
-            case (state)
-                IDLE: begin
-                    m_axi_arvalid <= 1'b0;
-                    m_axi_rready <= 1'b0;
-		    words_remaining <= 0;
-                    if (start) begin
-                        address_reg <= base_address;
-			words_remaining <= total_words_to_read;
-                        state <= CALC_BURST_LEN;
-                    end
+    // Only accept a start if we are completely idle
+    wire safe_start = start && !busy;
+
+    // We are always ready to receive data if a read is active.
+    assign m_axi_rready  = (r_words_left > 0) && data_ready; 
+    
+    assign data_out      = m_axi_rdata;
+    assign data_valid    = m_axi_rvalid && m_axi_rready;
+
+    wire [31:0] next_burst_size = (ar_words_left > MAX_BURST_LEN) ? MAX_BURST_LEN : ar_words_left;
+    wire can_issue = (outstanding_bursts < MAX_OUTSTANDING) && (ar_words_left > 0);
+
+    wire ar_fire = m_axi_arvalid && m_axi_arready;
+    wire r_last_fire = m_axi_rvalid && m_axi_rready && m_axi_rlast;
+
+    // --- 1. Address Channel (AR) Process ---
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            m_axi_arvalid <= 0;
+            m_axi_araddr  <= 0;
+            m_axi_arlen   <= 0;
+            ar_words_left <= 0;
+        end else if (safe_start) begin
+            m_axi_arvalid <= 0;
+            m_axi_araddr  <= base_address;
+            ar_words_left <= total_words_to_read;
+        end else begin
+            if (can_issue && !m_axi_arvalid) begin
+                m_axi_arvalid <= 1;
+                m_axi_arlen   <= next_burst_size - 1;
+            end else if (ar_fire) begin
+                m_axi_arvalid <= 0;
+                m_axi_araddr  <= m_axi_araddr + ((m_axi_arlen + 1) * (AXI_DATA_WIDTH/8));
+                ar_words_left <= ar_words_left - (m_axi_arlen + 1);
+            end
+        end
+    end
+
+    // --- 2. Outstanding Transaction Counter ---
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) outstanding_bursts <= 0;
+        else if (safe_start) outstanding_bursts <= 0;
+        else outstanding_bursts <= outstanding_bursts + ar_fire - r_last_fire;
+    end
+
+    // --- 3. Data Channel (R) Process ---
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            r_words_left <= 0;
+            done <= 0;
+        end else begin
+            done <= 0;
+            if (safe_start) begin
+                r_words_left <= total_words_to_read;
+            end else if (m_axi_rvalid && m_axi_rready) begin
+                r_words_left <= r_words_left - 1;
+                if (r_words_left == 1) begin
+                    done <= 1; // Pulse done when the very last word is received
                 end
-
-		CALC_BURST_LEN: begin
-		    if (words_remaining > MAX_BURST_LEN) begin
-                         burst_len_reg <= MAX_BURST_LEN - 1; // ARLEN is N-1
-                         current_transaction_size <= MAX_BURST_LEN;
-                     end else begin
-                         burst_len_reg <= words_remaining[7:0] - 1;
-                         current_transaction_size <= words_remaining;
-                     end
-                     
-                     m_axi_arvalid <= 1'b1;
-                     state <= SEND_AR;
-		end
-
-                SEND_AR: begin
-                    // Wait for the address to be accepted
-                    if (m_axi_arready) begin
-                        m_axi_arvalid <= 1'b0;
-                        m_axi_rready <= 1'b1; // Signal that we are ready to receive data
-                        state <= READ_DATA;
-                    end
-                end
-
-                // Note: Some AXI interconnects might deassert ARREADY before the first RVALID.
-                // A more robust FSM might have a WAIT_AR state, but this is simpler and often works.
-
-                READ_DATA: begin
-                    if (m_axi_rvalid) begin // Data is available from the slave
-                        if (m_axi_rlast) begin
-                            // This is the last beat of the burst
-                            m_axi_rready <= 1'b0;
-			    words_remaining <= words_remaining - current_transaction_size;
-			    address_reg <= address_reg + (current_transaction_size * (AXI_DATA_WIDTH/8));
-			    if (words_remaining == current_transaction_size) begin
-                                done <= 1'b1;
-                                state <= DONE_S;
-			    end else begin
-				state <= CALC_BURST_LEN;
-			    end
-                        end
-                    end
-                end
-
-                DONE_S: begin
-                    // Stay here for one cycle to ensure done pulse width
-                    state <= IDLE;
-                end
-
-                default: begin
-                    state <= IDLE;
-                end
-            endcase
+            end
         end
     end
 

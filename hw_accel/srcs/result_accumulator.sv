@@ -14,7 +14,7 @@ module result_accumulator #(
     // Control
     input wire clear_ptr,      // Reset internal pointers (Start of Tile)
     input wire accumulate_en,  // 0 = Overwrite (First IC), 1 = Add (Next ICs)
-    
+
     // Accelerator Interface (Push)
     input wire signed [PP_PAR-1:0][OC_PAR-1:0][ACC_WIDTH-1:0] acc_in_data,
     input wire acc_in_valid,

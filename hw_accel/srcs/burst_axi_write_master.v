@@ -1,189 +1,169 @@
 `default_nettype none
 /*
  * burst_axi_write_master
- *
- * Writes a burst of data to a specified AXI address.
- * Designed for offloading results from on-chip memory to HBM/DDR.
+ * Fully pipelined to allow overlapping AW, W, and B phases.
  */
 module burst_axi_write_master #(
     parameter AXI_ADDR_WIDTH = 64,
     parameter AXI_DATA_WIDTH = 512,
-    parameter MAX_BURST_LEN  = 64
+    parameter MAX_BURST_LEN  = 64,
+    parameter MAX_OUTSTANDING = 8
 ) (
     input wire clk,
-    input wire rst_n, // Active low reset
+    input wire rst_n, 
 
     // --- Control Interface ---
-    input wire start, // Pulse to initiate the burst write
-    input wire [AXI_ADDR_WIDTH-1:0] base_address,
-    input wire [15:0]               total_words_to_write,
+    input wire start, 
+    input wire[AXI_ADDR_WIDTH-1:0] base_address,
+    input wire [15:0]              total_words_to_write,
 
     // --- Data Input Interface (FIFO-like) ---
-    input wire [AXI_DATA_WIDTH-1:0] data_in,
-    input wire                      data_valid, // User logic has data ready
-    output wire                     data_ready, // Master is ready to accept data (WREADY && State)
+    input wire[AXI_DATA_WIDTH-1:0]  data_in,
+    input wire                      data_valid, 
+    output wire                     data_ready, 
 
     // --- AXI4 Master Write Interface ---
-    // Write Address Channel (AW)
     output reg                            m_axi_awvalid,
     input wire                            m_axi_awready,
-    output wire [AXI_ADDR_WIDTH-1:0]      m_axi_awaddr,
-    output wire [7:0]                     m_axi_awlen,
+    output reg[AXI_ADDR_WIDTH-1:0]       m_axi_awaddr,
+    output reg[7:0]                      m_axi_awlen,
     output wire [2:0]                     m_axi_awsize,
     output wire [1:0]                     m_axi_awburst,
 
-    // Write Data Channel (W)
     output wire                           m_axi_wvalid,
     input wire                            m_axi_wready,
     output wire [AXI_DATA_WIDTH-1:0]      m_axi_wdata,
     output wire [AXI_DATA_WIDTH/8-1:0]    m_axi_wstrb,
     output wire                           m_axi_wlast,
 
-    // Write Response Channel (B)
     input wire                            m_axi_bvalid,
-    output reg                            m_axi_bready,
+    output wire                           m_axi_bready,
     input wire [1:0]                      m_axi_bresp,
 
-    // --- Status ---
-    output reg done // Pulse high when the entire transfer is complete
+    output reg done 
 );
 
-    // --- FSM Definition ---
-    localparam IDLE           = 3'd0;
-    localparam CALC_BURST_LEN = 3'd1;
-    localparam SEND_AW        = 3'd2;
-    localparam SEND_W         = 3'd3;
-    localparam WAIT_B         = 3'd4;
-    localparam DONE_S         = 3'd5;
-
-    reg [2:0] state = IDLE;
-
-    // --- Internal Registers ---
-    reg [AXI_ADDR_WIDTH-1:0] address_reg;
-    reg [7:0]                burst_len_reg;
-    reg [31:0]               words_remaining;
-    reg [15:0]               current_transaction_size;
-    reg [15:0]               w_beat_count;
-
-    // --- AXI Signal Assignments ---
-    assign m_axi_awaddr  = address_reg;
-    assign m_axi_awlen   = burst_len_reg;
     assign m_axi_awsize  = $clog2(AXI_DATA_WIDTH/8);
-    assign m_axi_awburst = 2'b01; // INCR burst type
-
-    // --- Write Data Channel Assignments ---
-    // Pass data directly from input to AXI bus
-    assign m_axi_wdata   = data_in;
-    // Write Strobe: All ones (assuming full bus width writes)
+    assign m_axi_awburst = 2'b01; 
     assign m_axi_wstrb   = {(AXI_DATA_WIDTH/8){1'b1}};
-    
-    // Valid logic: We are valid if the user has data AND we are in the SEND_W state
-    assign m_axi_wvalid  = (state == SEND_W) && data_valid;
-    
-    // Last logic: High on the last beat of the current burst
-    assign m_axi_wlast   = (w_beat_count == burst_len_reg);
+    assign m_axi_bready  = 1'b1;
 
-    // --- User Interface Assignments ---
-    // We are ready for data if the slave is ready AND we are actively sending
-    assign data_ready    = (state == SEND_W) && m_axi_wready;
+    reg busy;
+    reg [31:0] aw_words_left;
+    reg [31:0] w_words_left;
+    reg [31:0] b_bursts_left;
+    reg [7:0]  outstanding_bursts;
+    reg[7:0]  w_beat_count;
+    
+    reg [31:0] aw_issued_count;
+    reg [31:0] w_issued_count;
+
+    wire safe_start = start && !busy && (total_words_to_write > 0);
+    
+    wire aw_fire = m_axi_awvalid && m_axi_awready;
+    wire w_fire  = m_axi_wvalid && m_axi_wready;
+    wire b_fire  = m_axi_bvalid && m_axi_bready;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= IDLE;
-            m_axi_awvalid <= 1'b0;
-            m_axi_bready  <= 1'b0;
-            done <= 1'b0;
-            address_reg <= 0;
-            burst_len_reg <= 0;
-            words_remaining <= 0;
-            current_transaction_size <= 0;
-            w_beat_count <= 0;
+            busy <= 0;
+            done <= 0;
         end else begin
-            // Default assignments
-            done <= 1'b0;
-
-            case (state)
-                IDLE: begin
-                    m_axi_awvalid <= 1'b0;
-                    m_axi_bready  <= 1'b0;
-                    words_remaining <= 0;
-                    if (start) begin
-                        address_reg <= base_address;
-                        words_remaining <= total_words_to_write;
-                        state <= CALC_BURST_LEN;
-                    end
-                end
-
-                CALC_BURST_LEN: begin
-                    // Determine the length of the next burst
-                    if (words_remaining > MAX_BURST_LEN) begin
-                        burst_len_reg <= MAX_BURST_LEN - 1; // AWLEN is N-1
-                        current_transaction_size <= MAX_BURST_LEN;
-                    end else begin
-                        burst_len_reg <= words_remaining[7:0] - 1;
-                        current_transaction_size <= words_remaining;
-                    end
-                    
-                    // Prepare for Address Phase
-                    m_axi_awvalid <= 1'b1;
-                    w_beat_count <= 0;
-                    state <= SEND_AW;
-                end
-
-                SEND_AW: begin
-                    // Wait for the write address to be accepted
-                    if (m_axi_awready) begin
-                        m_axi_awvalid <= 1'b0;
-                        state <= SEND_W;
-                    end
-                end
-
-                SEND_W: begin
-                    // Handshake: Wait for both Master Valid (data_valid) and Slave Ready
-                    if (m_axi_wvalid && m_axi_wready) begin
-                        
-                        // Check if this is the last beat of the burst
-                        if (m_axi_wlast) begin
-                            // Burst complete, wait for response
-                            m_axi_bready <= 1'b1;
-                            state <= WAIT_B;
-                        end else begin
-                            w_beat_count <= w_beat_count + 1;
-                        end
-                    end
-                end
-
-                WAIT_B: begin
-                    // Wait for Write Response (BVALID)
-                    if (m_axi_bvalid) begin
-                        m_axi_bready <= 1'b0; // Deassert ready
-                        
-                        // Update tracking registers
-                        words_remaining <= words_remaining - current_transaction_size;
-                        address_reg <= address_reg + (current_transaction_size * (AXI_DATA_WIDTH/8));
-
-                        // Check if we are done with the total transfer
-                        if (words_remaining == current_transaction_size) begin
-                            done <= 1'b1;
-                            state <= DONE_S;
-                        end else begin
-                            // More data to write, calculate next burst
-                            state <= CALC_BURST_LEN;
-                        end
-                    end
-                end
-
-                DONE_S: begin
-                    // Pulse done for one cycle
-                    state <= IDLE;
-                end
-
-                default: begin
-                    state <= IDLE;
-                end
-            endcase
+            done <= 0;
+            if (start && !busy) begin
+                if (total_words_to_write > 0) busy <= 1;
+                else done <= 1; // Immediately done if 0 words
+            end else if (busy && b_fire && (b_bursts_left == 1)) begin
+                busy <= 0;
+                done <= 1;
+            end
         end
     end
 
+    wire [31:0] next_aw_burst_size = (aw_words_left > MAX_BURST_LEN) ? MAX_BURST_LEN : aw_words_left;
+    wire can_issue_aw = (outstanding_bursts < MAX_OUTSTANDING) && (aw_words_left > 0);
+    
+    // AW Channel
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            m_axi_awvalid <= 0;
+            m_axi_awaddr  <= 0;
+            m_axi_awlen   <= 0;
+            aw_words_left <= 0;
+        end else if (safe_start) begin
+            m_axi_awvalid <= 0;
+            m_axi_awaddr  <= base_address;
+            aw_words_left <= total_words_to_write;
+        end else begin
+            if (can_issue_aw && !m_axi_awvalid) begin
+                m_axi_awvalid <= 1;
+                m_axi_awlen   <= next_aw_burst_size - 1;
+            end else if (aw_fire) begin
+                m_axi_awvalid <= 0;
+                m_axi_awaddr  <= m_axi_awaddr + ((m_axi_awlen + 1) * (AXI_DATA_WIDTH/8));
+                aw_words_left <= aw_words_left - (m_axi_awlen + 1);
+            end
+        end
+    end
+
+    // Outstanding Bursts Counter
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) outstanding_bursts <= 0;
+        else if (safe_start) outstanding_bursts <= 0;
+        else outstanding_bursts <= outstanding_bursts + aw_fire - b_fire;
+    end
+    
+    // B Bursts Left Counter
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) b_bursts_left <= 0;
+        else if (safe_start) b_bursts_left <= (total_words_to_write + MAX_BURST_LEN - 1) / MAX_BURST_LEN;
+        else if (b_fire) b_bursts_left <= b_bursts_left - 1;
+    end
+    
+    // W Channel Logic
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            aw_issued_count <= 0;
+            w_issued_count <= 0;
+        end else if (safe_start) begin
+            aw_issued_count <= 0;
+            w_issued_count <= 0;
+        end else begin
+            if (aw_fire) aw_issued_count <= aw_issued_count + 1;
+            if (w_fire && m_axi_wlast) w_issued_count <= w_issued_count + 1;
+        end
+    end
+
+    reg [31:0] latched_w_burst_size;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            latched_w_burst_size <= 0;
+        end else if (safe_start) begin
+            latched_w_burst_size <= (total_words_to_write > MAX_BURST_LEN) ? MAX_BURST_LEN : total_words_to_write;
+        end else if (w_fire && m_axi_wlast) begin
+            latched_w_burst_size <= ((w_words_left - 1) > MAX_BURST_LEN) ? MAX_BURST_LEN : (w_words_left - 1);
+        end
+    end
+
+    wire w_allowed = (aw_issued_count > w_issued_count) || aw_fire;
+
+    assign m_axi_wvalid = data_valid && w_allowed && (w_words_left > 0);
+    assign data_ready   = m_axi_wready && w_allowed && (w_words_left > 0);
+    assign m_axi_wdata  = data_in;
+    assign m_axi_wlast  = (w_beat_count == latched_w_burst_size - 1);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            w_words_left <= 0;
+            w_beat_count <= 0;
+        end else if (safe_start) begin
+            w_words_left <= total_words_to_write;
+            w_beat_count <= 0;
+        end else if (w_fire) begin
+            w_words_left <= w_words_left - 1;
+            if (m_axi_wlast) w_beat_count <= 0;
+            else w_beat_count <= w_beat_count + 1;
+        end
+    end
 endmodule
 `default_nettype wire
