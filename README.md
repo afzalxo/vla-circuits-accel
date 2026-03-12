@@ -52,7 +52,7 @@ The design is currently running at only around 148 MHz as I have not optimized c
 The next steps are to train the model with instruction-specific grouping of tiles, similar to what we did for the BabyAI dataset. The hardware accelerator already supports tile masking using `is_sparse`, `ic_tile_mask`, and `oc_tile_mask` flags which allow skipping portions of the model not needed for the active task. Once this is finished, I will work on task composition: Circuit('follow lane' in 'weather') U Circuit('follow lane' in 'dynamic') = Circuit('follow lane' in 'weather' and 'dynamic').
 
 
-### Updates on Model and Hardware
+### Updates on Model and Hardware (12th March)
 
 I have been working on improving the hardware accelerators performance. 
 
@@ -64,7 +64,7 @@ I have been working on improving the hardware accelerators performance.
 
 On the model side, I added a task-gated mechanism for training the model. I added a `TileGatingNetwork` which predicts which of the hardware tiles to turn on or off for the currently active task. The training process involves training the model parameters and the tile gating network jointly, so the tiles chosen for a certain task are optimized for that task. I trained the gated model on the carla dataset. The trained model achieves around 35.3% tile sparsity (i.e., this proportion of the total tiles in the model are inactive). Here is the breakdown of the MAC and parameter activation for different tasks:
 
-## Hardware-Aligned Computation & Parameter Sparsity (VLA Gated Conv Layers)
+##### Hardware-Aligned Computation & Parameter Sparsity (VLA Gated Conv Layers)
 
 | Task               | Active MACs | Total MACs | Active % (MACs) | Active Params | Total Params | Active % (Params) |
 |--------------------|-------------|------------|-----------------|---------------|--------------|-------------------|
@@ -81,7 +81,7 @@ I also measured runtimes of different tasks on the FPGA to ensure that the tile-
 
 The task specific activation of tiles is shown below:
 
-
+<img width="4800" height="2400" alt="task-sparse-circuits" src="https://github.com/user-attachments/assets/6952ba52-ca71-4519-9415-0866f2f83a8f" />
 
 
 Right now, I am working on further improving the design's latency somehow. Three avenues remain:
